@@ -1666,6 +1666,509 @@ DOCKER_COMPOSE = {
 }
 
 
+DOCKER_MULTI_STAGE_BUILDS = {
+    "status": "complete",
+    "skill_aliases": ("docker", "docker & containers"),
+    "competency": "Multi-stage builds",
+    "objective": "Use multi-stage builds to keep build tools out of the final image and produce smaller, more secure production images.",
+    "objectives": [
+        "Explain why shipping build tools in a production image is wasteful and risky.",
+        "Use multiple `FROM` instructions to create build and runtime stages.",
+        "Copy artifacts between stages with `COPY --from=STAGE`.",
+        "Choose a small runtime base image such as `alpine` or `distroless`.",
+        "Identify the final stage as the only image that is kept.",
+    ],
+    "prerequisites": [],
+    "roadmap_rationale": (
+        "Multi-stage builds is an advanced Dockerfile technique. It belongs after Dockerfile because it "
+        "builds on the same instructions, and after Images because the learner already understands layers "
+        "and image size."
+    ),
+    "learn": {
+        "title": "Multi-stage builds",
+        "explanation": (
+            "A Dockerfile can have more than one `FROM` instruction. Each `FROM` begins a new **stage**. "
+            "You use a large build stage to compile code or install dependencies, then `COPY --from=BUILD_STAGE` "
+            "only the compiled artifact into a small runtime stage. The final image contains only what is "
+            "needed at runtime, so it is smaller, faster to deploy, and has fewer security risks."
+        ),
+        "key_ideas": [
+            "Each `FROM` in a Dockerfile starts a new stage; only the last stage becomes the final image.",
+            "The build stage can contain compilers, dev tools, and source code that the runtime does not need.",
+            "`COPY --from=builder /src/app /app/app` copies a file from the `builder` stage into the current stage.",
+            "A small runtime base image such as `alpine`, `debian:slim`, or `distroless` keeps the attack surface low.",
+            "Multi-stage builds reduce image size and avoid shipping secrets that were only needed during build.",
+        ],
+        "key_terms": {
+            "stage": "A named or numbered build phase in a Dockerfile, started by a FROM instruction.",
+            "builder stage": "The stage that compiles or packages the application.",
+            "runtime stage": "The final stage that becomes the published image.",
+            "COPY --from": "An instruction that copies files from a previous stage into the current stage.",
+            "artifact": "A compiled binary, bundle, or other file produced by the build stage.",
+        },
+        "job_relevance": (
+            "Production images should be small and contain only runtime dependencies. Multi-stage builds are "
+            "the standard way to achieve that in Docker, and interviewers often ask why an image should not "
+            "ship with compilers or source code."
+        ),
+        "real_world_example": (
+            "A Go application needs a Go compiler to build, but the compiled binary runs on its own. A multi-stage "
+            "Dockerfile builds the binary in a `golang:1.22` stage, then copies the single binary into an `alpine` "
+            "stage. The final image is a few megabytes instead of hundreds, and it does not contain the Go toolchain."
+        ),
+        "common_mistake": (
+            "Do not leave build-only tools such as compilers or dev dependencies in the final stage. Move those "
+            "steps to a separate stage and copy only the runtime artifact."
+        ),
+        "worked_example": (
+            "The example builds a small Go binary in one stage and copies only that binary into a minimal runtime image."
+        ),
+        "depth_note": "Canonical advanced content; it is fixed by the curated knowledge base, not generated for a target role.",
+        "version_note": (
+            "Examples use Dockerfile syntax compatible with Docker Engine 23+ and BuildKit. SkillBridge does not "
+            "execute Docker commands."
+        ),
+        "grounding_sources": [
+            {"title": "Multi-stage builds", "url": "https://docs.docker.com/build/building/multi-stage/", "source": "Docker documentation"},
+            {"title": "Docker build overview", "url": "https://docs.docker.com/build/", "source": "Docker documentation"},
+        ],
+    },
+    "example": {
+        "title": "Build a Go binary in one stage and run it in a small image",
+        "type": "bash",
+        "content": (
+            "# Dockerfile\n"
+            "# Stage 1: build\n"
+            "FROM golang:1.22 AS builder\n"
+            "WORKDIR /src\n"
+            "COPY . .\n"
+            "RUN go build -o app .\n"
+            "\n"
+            "# Stage 2: runtime\n"
+            "FROM alpine:3.19\n"
+            "WORKDIR /app\n"
+            "COPY --from=builder /src/app .\n"
+            "CMD [\"./app\"]\n"
+            "\n"
+            "# Build and run\n"
+            "docker build -t myapp:1.0 .\n"
+            "docker run --rm myapp:1.0"
+        ),
+        "explanation": (
+            "Only the compiled binary moves from the builder stage to the runtime stage. The Go compiler and "
+            "source code stay behind, so the final image is much smaller. Worked example for reading — SkillBridge "
+            "does not run these commands."
+        ),
+    },
+    "practice": {
+        "type": "practical",
+        "title": "Shrink a Node.js image with a multi-stage build",
+        "task": (
+            "Your current Dockerfile installs `node_modules` and copies all source into the final image. Rewrite it "
+            "as a multi-stage build. Requirements: (1) Stage 1 uses `node:20` to install dependencies and build the "
+            "production bundle, (2) Stage 2 uses a smaller runtime image and copies only the built artifacts and "
+            "the files needed to run, (3) the final container runs as a non-root user, (4) write the `docker build` "
+            "and `docker run` commands. SkillBridge reviews your Dockerfile and commands as text only — it never "
+            "executes them."
+        ),
+        "response_type": "configuration",
+        "competency": "Multi-stage builds",
+        "evaluation_note": (
+            "Static text review only: SkillBridge checks for two `FROM` stages, `COPY --from` to move artifacts, "
+            "a smaller runtime base image, a non-root `USER`, `docker build -t myapp:1.0 .`, and a `docker run` "
+            "command. It does not run Docker, so the review cannot prove runtime results. A strong answer keeps "
+            "build tools in the first stage only and explains why the final image is smaller. A weak answer copies "
+            "`node_modules` from the build stage without pruning or omits the non-root user."
+        ),
+    },
+    "mini_check": {
+        "questions": [
+            {"id": "m1", "type": "mcq", "question": "What is the main purpose of a multi-stage build?", "options": ["Keep build tools out of the final image", "Make the build run on multiple machines", "Increase the number of layers", "Allow containers to share networks"], "correct_answer": "Keep build tools out of the final image", "competency": "Multi-stage builds", "difficulty": "beginner", "misconception_hint": "Think about what stays in the published image versus what is only needed during build."},
+            {"id": "m2", "type": "mcq", "question": "Which instruction copies a file from a previous build stage?", "options": ["COPY --from=builder", "COPY --stage=builder", "FROM --copy", "RUN --from=builder"], "correct_answer": "COPY --from=builder", "competency": "Multi-stage builds", "difficulty": "beginner", "misconception_hint": "The instruction is a normal COPY with an extra flag naming the source stage."},
+            {"id": "m3", "type": "mcq", "question": "Which stage becomes the final Docker image?", "options": ["The last FROM stage", "The first FROM stage", "All stages combined", "The smallest stage automatically"], "correct_answer": "The last FROM stage", "competency": "Multi-stage builds", "difficulty": "beginner", "misconception_hint": "Docker keeps only one stage as the output image."},
+        ]
+    },
+    "locales": {
+        "ar": {
+            "learn": {
+                "title": "الـ Multi-stage Builds",
+                "explanation": "الـ Dockerfile ممكن يكون فيه أكتر من تعليمة `FROM`. كل `FROM` بتبدأ **stage** جديد. بتستخدم stage كبير للـ build عشان تCompile الكود أو تنزّل الاعتماديات، وبعدين `COPY --from=BUILD_STAGE` بس للـ artifact المبني لمرحلة runtime صغيرة. الصورة النهائية بتحتوي بس على اللي محتاجه وقت التشغيل، فبتبقى أصغر وأسرع في النشر وأقل مخاطر أمنية.",
+                "key_ideas": [
+                    "كل `FROM` في Dockerfile بيبدأ stage جديد؛ بس آخر stage بيكون الصورة النهائية.",
+                    "مرحلة الـ build ممكن تحتوي على compilers وأدوات تطوير وsource code مش محتاجينها في الـ runtime.",
+                    "`COPY --from=builder /src/app /app/app` بينسخ ملف من stage `builder` للمرحلة الحالية.",
+                    "صورة runtime صغيرة زي `alpine` أو `debian:slim` أو `distroless` بتقلل مساحة الهجوم.",
+                    "الـ Multi-stage builds بتقلل حجم الصورة وبتتجنب شحن secrets كانت محتاجة بس وقت الـ build.",
+                ],
+                "key_terms": {"stage": "مرحلة build مسمّاة أو مرقّمة في Dockerfile، بتبدأ بتعليمة FROM.", "builder stage": "المرحلة اللي بتcompile أو بتpackage التطبيق.", "runtime stage": "المرحلة النهائية اللي بتبقى الصورة المنشورة.", "COPY --from": "تعليمة بتنسخ ملفات من stage سابق للمرحلة الحالية.", "artifact": "الـ binary المcompiled أو bundle أو ملف تاني انتجته مرحلة الـ build."},
+                "job_relevance": "الصور الإنتاجية لازم تكون صغيرة وتحتوي بس على اعتماديات التشغيل. الـ Multi-stage builds هي الطريقة القياسية لتحقيق ده في Docker، والمقابلات بتسأل ليه الصورة مش لازم تشحن compilers أو source code.",
+                "real_world_example": "تطبيق Go محتاج Go compiler عشان يتبنى، بس الـ binary المcompiled بيشتغل لوحده. Dockerfile multi-stage بيبني الـ binary في stage `golang:1.22`، وبعدين بينسخه لـ stage `alpine`. الصورة النهائية بقىت بضعة megabytes بدل مئات، ومش بتحتوي على Go toolchain.",
+                "common_mistake": "ما تسيبش أدوات build زي compilers أو dev dependencies في المرحلة النهائية. حوّل الخطوات دي لـ stage منفصل وانسخ بس الـ artifact اللي محتاجه وقت التشغيل.",
+                "worked_example": "المثال بيبني binary صغير بـ Go في مرحلة واحدة وبينسخه بس لصورة runtime صغيرة.",
+                "depth_note": "محتوى متقدم ثابت من قاعدة المعرفة المراجَعة، مش محتوى مولّد حسب الوظيفة.",
+                "version_note": "الأمثلة تستخدم صيغة Dockerfile متوافقة مع Docker Engine 23+ وBuildKit. SkillBridge ما بينفّذش أوامر Docker.",
+                "grounding_sources": [
+                    {"title": "الـ Multi-stage builds", "url": "https://docs.docker.com/build/building/multi-stage/", "source": "Docker documentation"},
+                    {"title": "نظرة عامة على Docker build", "url": "https://docs.docker.com/build/", "source": "Docker documentation"},
+                ],
+            },
+            "example": {
+                "title": "ابنِ binary بـ Go في مرحلة وشغّله في صورة صغيرة",
+                "type": "bash",
+                "content": "# Dockerfile\n# Stage 1: build\nFROM golang:1.22 AS builder\nWORKDIR /src\nCOPY . .\nRUN go build -o app .\n\n# Stage 2: runtime\nFROM alpine:3.19\nWORKDIR /app\nCOPY --from=builder /src/app .\nCMD [\"./app\"]\n\n# Build and run\ndocker build -t myapp:1.0 .\ndocker run --rm myapp:1.0",
+                "explanation": "بس الـ binary المcompiled بيتحوّل من مرحلة الـ builder لمرحلة الـ runtime. Go compiler وsource code بيفضلوا ورا، فالصورة النهائية أصغر بكتير. مثال للقراية — SkillBridge ما بينفّذش الأوامر دي.",
+            },
+            "practice": {
+                "title": "صغّر صورة Node.js بـ multi-stage build",
+                "task": "الـ Dockerfile الحالي عندك بينزّل `node_modules` وينسخ كل الـ source للصورة النهائية. اكتبه من جديد كـ multi-stage build. المتطلبات: (١) المرحلة الأولى تستخدم `node:20` لتنزيل الاعتماديات وتبني الـ production bundle، (٢) المرحلة التانية تستخدم صورة runtime أصغر وتنسخ بس الـ artifacts المبنية والملفات اللي محتاجة للتشغيل، (٣) الحاوية النهائية تشتغل بـ non-root user، (٤) اكتب أوامر `docker build` و`docker run`. SkillBridge بيراجع الـ Dockerfile والأوامر كنص بس — مش بينفّذهم.",
+                "response_type": "configuration",
+                "competency": "Multi-stage builds",
+                "evaluation_note": "مراجعة نصية ثابتة فقط: SkillBridge بيتأكد من وجود مرحلتين `FROM`، و`COPY --from` لنقل الـ artifacts، وصورة runtime أصغر، و`USER` غير root، و`docker build -t myapp:1.0 .`، وأمر `docker run`. مش بيشغّل Docker، فالمراجعة ما بتثبتش نتيجة تشغيل. الإجابة القوية بتسبب أدوات الـ build في المرحلة الأولى بس وبتشرح ليه الصورة النهائية أصغر. الإجابة الضعيفة بتنسخ `node_modules` من مرحلة الـ build من غير ما تنضّفها أو تنسى الـ non-root user.",
+            },
+            "mini_check": {"questions": [
+                {"id": "m1", "question": "إيه الغرض الرئيسي من multi-stage build؟", "options": ["إبقاء أدوات البناء برّا الصورة النهائية", "تشغيل الـ build على أكتر من جهاز", "زيادة عدد الطبقات", "خلّي الحاويات تشارك شبكات"], "misconception_hint": "فكّر إيه بيفضل في الصورة المنشورة مقارنة بإيه محتاجه بس وقت الـ build."},
+                {"id": "m2", "question": "أي تعليمة بتنسخ ملف من مرحلة build سابقة؟", "options": ["COPY --from=builder", "COPY --stage=builder", "FROM --copy", "RUN --from=builder"], "misconception_hint": "التعليمة هي COPY عادية مع فلاغ إضافي بيسمّي الـ source stage."},
+                {"id": "m3", "question": "أي مرحلة بتبقى الصورة النهائية بتاعة Docker؟", "options": ["آخر مرحلة FROM", "أول مرحلة FROM", "كل المراحل مجمعة", "أصغر مرحلة تلقائيًا"], "misconception_hint": "Docker بيحتفظ بمرحلة واحدة بس كصورة ناتجة."},
+            ]},
+        },
+    },
+}
+
+
+DOCKER_SECURITY_SECRETS = {
+    "status": "complete",
+    "skill_aliases": ("docker", "docker & containers"),
+    "competency": "Security & secrets",
+    "objective": "Apply basic container security practices: run as non-root, avoid hardcoded secrets, and use Docker secrets appropriately.",
+    "objectives": [
+        "Explain why running containers as root increases risk.",
+        "Use `USER` in a Dockerfile to drop privileges.",
+        "Avoid baking credentials, tokens, or `.env` files into images.",
+        "Distinguish between plain environment variables and Docker secrets.",
+        "Choose minimal base images and keep images up to date.",
+    ],
+    "prerequisites": [],
+    "roadmap_rationale": (
+        "Security & secrets follows Dockerfile and Images because most security decisions are made when "
+        "choosing a base image and writing the Dockerfile. It is the last advanced topic before orchestration."
+    ),
+    "learn": {
+        "title": "Security & secrets",
+        "explanation": (
+            "A container is only as secure as its image and runtime settings. The two most common beginner "
+            "mistakes are running everything as root and baking secrets into the image. A safer Dockerfile uses "
+            "a minimal base image, creates an unprivileged user with `USER`, keeps credentials out of layers, "
+            "and passes sensitive values at runtime through environment variables or Docker secrets."
+        ),
+        "key_ideas": [
+            "By default many containers run as root; an attacker who escapes the container gains root on the host.",
+            "`RUN useradd -m appuser` and `USER appuser` reduce the damage if the container is compromised.",
+            "Never `COPY .env` or hardcode passwords into a Dockerfile; they become part of the image history.",
+            "Environment variables are convenient but visible in `docker inspect`; Docker secrets (Swarm/Kubernetes) are better for clustered environments.",
+            "Smaller, updated base images have fewer known vulnerabilities and a smaller attack surface.",
+        ],
+        "key_terms": {
+            "rootless": "Running a container process as a non-root user.",
+            "USER": "A Dockerfile instruction that sets the user for the rest of the build and for runtime.",
+            "secret": "Sensitive data such as a password, API key, or certificate that must not be stored in an image.",
+            "Docker secret": "A Swarm feature that mounts secrets into containers without storing them in environment variables.",
+            "attack surface": "The number of ways an attacker could exploit a system; smaller images have a smaller surface.",
+        },
+        "job_relevance": (
+            "Security audits, supply-chain reviews, and production deployments all expect containers to run as "
+            "non-root and to keep secrets out of images. These practices are baseline expectations for backend "
+            "and DevOps roles."
+        ),
+        "real_world_example": (
+            "A team discovers their API image contains a `.env` file with a production database password. They "
+            "rebuild the Dockerfile: remove the `.env` COPY, add an unprivileged user, pass `DATABASE_URL` at "
+            "runtime, and switch from `node:20` to `node:20-alpine`. The image is smaller and no longer leaks credentials."
+        ),
+        "common_mistake": (
+            "Do not put real passwords, API keys, or `.env` files in a Dockerfile or image layers. Even if you "
+            "delete them in a later instruction, the earlier layer still contains them."
+        ),
+        "worked_example": (
+            "The example shows a Dockerfile that creates a non-root user, avoids copying secrets, and uses a "
+            "minimal base image."
+        ),
+        "depth_note": "Canonical advanced content; it is fixed by the curated knowledge base, not generated for a target role.",
+        "version_note": (
+            "Examples use Dockerfile syntax compatible with Docker Engine 23+ and BuildKit. SkillBridge does not "
+            "execute Docker commands. No real credentials are used in any example."
+        ),
+        "grounding_sources": [
+            {"title": "Dockerfile best practices", "url": "https://docs.docker.com/build/building/best-practices/", "source": "Docker documentation"},
+            {"title": "Docker secrets", "url": "https://docs.docker.com/engine/swarm/secrets/", "source": "Docker documentation"},
+        ],
+    },
+    "example": {
+        "title": "Run a Node.js container as a non-root user without baked secrets",
+        "type": "bash",
+        "content": (
+            "# Dockerfile\n"
+            "FROM node:20-alpine\n"
+            "RUN addgroup -S appgroup && adduser -S appuser -G appgroup\n"
+            "WORKDIR /app\n"
+            "COPY package*.json ./\n"
+            "RUN npm install --omit=dev\n"
+            "COPY . .\n"
+            "USER appuser\n"
+            "EXPOSE 3000\n"
+            "CMD [\"node\", \"server.js\"]\n"
+            "\n"
+            "# Run, passing the secret at runtime, not in the image\n"
+            "docker run -d --name api -e DATABASE_URL=\"REPLACE_AT_RUNTIME\" -p 3000:3000 myapi:1.0"
+        ),
+        "explanation": (
+            "The image creates an unprivileged user, installs only production dependencies, and never copies a "
+            "`.env` file. The real `DATABASE_URL` is provided when the container starts. Worked example for reading — "
+            "SkillBridge does not run these commands."
+        ),
+    },
+    "practice": {
+        "type": "practical",
+        "title": "Secure a Dockerfile that currently leaks a secret",
+        "task": (
+            "You are reviewing a Dockerfile that contains `COPY .env .` and the `.env` file has "
+            "`DATABASE_URL=postgres://user:secret@db:5432/app`. Rewrite the approach to be secure: (1) explain "
+            "why copying `.env` into the image is dangerous, (2) show a Dockerfile that creates a non-root user, "
+            "does not copy secrets, uses a minimal base image, and (3) show the `docker run` command that passes "
+            "the secret via an environment variable at runtime. Do not include real credentials. SkillBridge reviews "
+            "your Dockerfile and commands as text only — it never executes them."
+        ),
+        "response_type": "configuration",
+        "competency": "Security & secrets",
+        "evaluation_note": (
+            "Static text review only: SkillBridge checks for a clear warning about copying `.env`/secrets into "
+            "the image, a non-root `USER` instruction, a minimal base image (e.g. alpine/slim), no secret literals "
+            "in the Dockerfile, and a `docker run` command that passes the secret at runtime with `-e`. It does not "
+            "run Docker, so the review cannot prove runtime results. A strong answer explains that image layers keep "
+            "the secret forever. A weak answer leaves the secret in the Dockerfile or ignores the non-root user."
+        ),
+    },
+    "mini_check": {
+        "questions": [
+            {"id": "s1", "type": "mcq", "question": "Why is `COPY .env .` in a Dockerfile dangerous?", "options": ["The secret becomes part of the image history", "It makes the container run slower", "It prevents the container from starting", "It disables networking"], "correct_answer": "The secret becomes part of the image history", "competency": "Security & secrets", "difficulty": "beginner", "misconception_hint": "Image layers are immutable; anything copied in stays visible in the image."},
+            {"id": "s2", "type": "mcq", "question": "Which Dockerfile instruction sets the user the container runs as?", "options": ["USER", "RUNAS", "WHOAMI", "GROUP"], "correct_answer": "USER", "competency": "Security & secrets", "difficulty": "beginner", "misconception_hint": "This instruction drops privileges for the remaining build steps and for runtime."},
+            {"id": "s3", "type": "mcq", "question": "Where should a production database password be provided?", "options": ["At runtime via an environment variable or secret manager", "Hardcoded in the Dockerfile", "Baked into the image as a config file", "Written in the source code"], "correct_answer": "At runtime via an environment variable or secret manager", "competency": "Security & secrets", "difficulty": "beginner", "misconception_hint": "Secrets belong outside the image so they can be rotated and are not stored in layers."},
+        ]
+    },
+    "locales": {
+        "ar": {
+            "learn": {
+                "title": "الأمان والـ Secrets",
+                "explanation": "الحاوية أمنها بيعتمد على صورتها وإعدادات تشغيلها. أشهر غلطتين للمبتدئين هي تشغيل كل حاجة كـ root وخبز الـ secrets جوه الصورة. Dockerfile أكثر أمانًا بيستخدم صورة أساسية صغيرة، وبينشئ user غير privileged بـ `USER`، وبيبعد الاعتمادات عن الطبقات، وبمرّر القيم الحساسة وقت التشغيل عن طريق environment variables أو Docker secrets.",
+                "key_ideas": [
+                    "افتراضيًا كتير من الحاويات بتشتغل كـ root؛ لو مهاجم خرج من الحاوية يبقى root على الـ host.",
+                    "`RUN useradd -m appuser` و`USER appuser` بيقللوا الضرر لو الحاوية ات compromized.",
+                    "ما تعملش `COPY .env` أو تثبت كلمات سر في Dockerfile؛ هما بيبقوا جزء من تاريخ الصورة.",
+                    "الـ Environment variables سهلة بس ظاهرة في `docker inspect`؛ Docker secrets (Swarm/Kubernetes) أحسن للـ clustered environments.",
+                    "الصور الأساسية الصغيرة والمحدّثة عندها ثغرات معروفة أقل ومساحة هجوم أصغر.",
+                ],
+                "key_terms": {"rootless": "تشغيل عملية الحاوية كـ user غير root.", "USER": "تعليمة في Dockerfile بتحدد الـ user لباقي الـ build ولوقت التشغيل.", "secret": "بيانات حساسة زي باسورد أو API key أو certificate لازم ما تتخزّنش في الصورة.", "Docker secret": "ميزة في Swarm بتركّب secrets في الحاويات من غير ما تخزّنهم في environment variables.", "attack surface": "عدد الطرق اللي ممكن للمهاجم يستغلها؛ الصور الأصغر عندها مساحة هجوم أصغر."},
+                "job_relevance": "التدقيقات الأمنية ومراجعات الـ supply-chain والنشرات الإنتاجية كلها بتتوقع إن الحاويات تشتغل غير root وإن الـ secrets تبقى برّا الصور. الممارسات دي توقعات أساسية لمهام backend وDevOps.",
+                "real_world_example": "فريق اكتشف إن صورة الـ API تحتوي على ملف `.env` فيه باسورد قاعدة البيانات الإنتاجية. أعادوا بناء الـ Dockerfile: شالوا COPY بتاع `.env`، ضافوا unprivileged user، مرّروا `DATABASE_URL` وقت التشغيل، وغيّروا من `node:20` لـ `node:20-alpine`. الصورة بقت أصغر ولم تعد تسرب بيانات الاعتماد.",
+                "common_mistake": "ما تحطش باسوردات حقيقية أو API keys أو ملفات `.env` في Dockerfile أو طبقات الصورة. حتى لو حذفتهم في خطوة لاحقة، الطبقة الأولى لسه بتحتوي عليهم.",
+                "worked_example": "المثال بيوضّح Dockerfile بيعمل user غير root، ويتجنب نسخ secrets، ويستخدم صورة أساسية صغيرة.",
+                "depth_note": "محتوى متقدم ثابت من قاعدة المعرفة المراجَعة، مش محتوى مولّد حسب الوظيفة.",
+                "version_note": "الأمثلة تستخدم صيغة Dockerfile متوافقة مع Docker Engine 23+ وBuildKit. SkillBridge ما بينفّذش أوامر Docker. مفيش بيانات اعتماد حقيقية مستخدمة في أي مثال.",
+                "grounding_sources": [
+                    {"title": "أفضل ممارسات Dockerfile", "url": "https://docs.docker.com/build/building/best-practices/", "source": "Docker documentation"},
+                    {"title": "Docker secrets", "url": "https://docs.docker.com/engine/swarm/secrets/", "source": "Docker documentation"},
+                ],
+            },
+            "example": {
+                "title": "شغّل حاوية Node.js كـ non-root user من غير secrets مخبوزة",
+                "type": "bash",
+                "content": "# Dockerfile\nFROM node:20-alpine\nRUN addgroup -S appgroup && adduser -S appuser -G appgroup\nWORKDIR /app\nCOPY package*.json ./\nRUN npm install --omit=dev\nCOPY . .\nUSER appuser\nEXPOSE 3000\nCMD [\"node\", \"server.js\"]\n\n# Run, passing the secret at runtime, not in the image\ndocker run -d --name api -e DATABASE_URL=\"REPLACE_AT_RUNTIME\" -p 3000:3000 myapi:1.0",
+                "explanation": "الصورة بتعمل user غير privileged، بتنزّل بس production dependencies، ومش بنسخ ملف `.env`. الـ `DATABASE_URL` الحقيقي بيتقدّم لما الحاوية تبدأ. مثال للقراية — SkillBridge ما بينفّذش الأوامر دي.",
+            },
+            "practice": {
+                "title": "أأمن Dockerfile بيسرب secret",
+                "task": "بت reviewing Dockerfile فيها `COPY .env .` والملف `.env` فيه `DATABASE_URL=postgres://user:secret@db:5432/app`. اكتب الطريقة الأكثر أمانًا: (١) اشرح ليه نسخ `.env` جوه الصورة خطير، (٢) ورّي Dockerfile بيعمل non-root user، ومينسخش secrets، ويستخدم صورة أساسية صغيرة، و(٣) اكتب أمر `docker run` اللي بيمرّر الـ secret عن طريق environment variable وقت التشغيل. متضمنش بيانات اعتماد حقيقية. SkillBridge بيراجع الـ Dockerfile والأوامر كنص بس — مش بينفّذها.",
+                "response_type": "configuration",
+                "competency": "Security & secrets",
+                "evaluation_note": "مراجعة نصية ثابتة فقط: SkillBridge بيتأكد من تحذير واضح عن نسخ `.env`/secrets للصورة، وتعليمة `USER` غير root، وصورة أساسية صغيرة (مثلًا alpine/slim)، ومفيش secret literals في الـ Dockerfile، وأمر `docker run` بيمرّر الـ secret وقت التشغيل بـ `-e`. مش بيشغّل Docker، فالمراجعة ما بتثبتش نتيجة تشغيل. الإجابة القوية بتشرح إن طبقات الصورة بتحتفظ بالـ secret للأبد. الإجابة الضعيفة بتسيب الـ secret في Dockerfile أو تتجاهل الـ non-root user.",
+            },
+            "mini_check": {"questions": [
+                {"id": "s1", "question": "ليه `COPY .env .` في Dockerfile خطير؟", "options": ["الـ Secret بيبقى جزء من تاريخ الصورة", "بيخلي الحاوية تشتغل أبطأ", "بيمنع الحاوية من البدء", "بيوقف الشبكة"], "misconception_hint": "طبقات الصورة immutable؛ أي حاجة اتنسخت فيها بتفضل ظاهرة في الصورة."},
+                {"id": "s2", "question": "أي تعليمة في Dockerfile بتحدد الـ user اللي الحاوية بتشتغل بيه؟", "options": ["USER", "RUNAS", "WHOAMI", "GROUP"], "misconception_hint": "التعليمة دي بتقلّل الصلاحيات لباقي خطوات الـ build ولوقت التشغيل."},
+                {"id": "s3", "question": "فين لازم يتقدّم باسورد قاعدة البيانات الإنتاجية؟", "options": ["وقت التشغيل عن طريق environment variable أو secret manager", "مثبت في Dockerfile", "مخبوز في الصورة كـ config file", "مكتوب في source code"], "misconception_hint": "الـ Secrets لازم تكون برّا الصورة عشان تتغيّر وما تتخزّنش في الطبقات."},
+            ]},
+        },
+    },
+}
+
+
+DOCKER_ORCHESTRATION_BASICS = {
+    "status": "complete",
+    "skill_aliases": ("docker", "docker & containers"),
+    "competency": "Orchestration basics",
+    "objective": "Understand why container orchestration exists and compare Docker Swarm, Kubernetes, and Docker Compose.",
+    "objectives": [
+        "Explain why orchestration is needed for production multi-container systems.",
+        "Describe scaling, self-healing, load balancing, and rolling updates.",
+        "Create a simple Docker Swarm service with `docker service create`.",
+        "Recognize Kubernetes as a more powerful, widely used orchestrator.",
+        "Distinguish Docker Compose (single-host development) from orchestration (multi-host production).",
+    ],
+    "prerequisites": [],
+    "roadmap_rationale": (
+        "Orchestration basics is the final Docker topic. It assumes the learner already understands individual "
+        "containers, images, networking, and Compose, and is ready to see how those concepts scale to production."
+    ),
+    "learn": {
+        "title": "Orchestration basics",
+        "explanation": (
+            "Running one container on one machine is easy. Running tens or hundreds across many machines, keeping "
+            "them healthy, balancing traffic, and updating them without downtime requires **orchestration**. "
+            "Docker Swarm is Docker's built-in orchestrator; Kubernetes is the industry-standard platform. Both "
+            "manage **services** — logical groups of identical containers — rather than individual containers."
+        ),
+        "key_ideas": [
+            "Orchestrators place containers across a cluster, restart failed ones, and scale them up or down.",
+            "A service in Swarm or Kubernetes is a desired state: 'run 3 replicas of this container'.",
+            "Load balancing spreads traffic across replicas so no single container is overwhelmed.",
+            "Self-healing means the orchestrator replaces containers that crash or become unhealthy.",
+            "Docker Compose is great for local development on one machine; orchestrators manage production clusters.",
+        ],
+        "key_terms": {
+            "orchestration": "Automated management of container deployment, scaling, networking, and health.",
+            "cluster": "A group of machines (nodes) that run containers managed by an orchestrator.",
+            "service": "A logical group of identical containers that share a name and scaling policy.",
+            "replica": "One running instance of a service.",
+            "self-healing": "The ability of an orchestrator to detect and replace failed containers automatically.",
+            "rolling update": "Replacing old containers with new ones gradually to avoid downtime.",
+        },
+        "job_relevance": (
+            "Production systems run on orchestrators. Understanding the basics of Swarm and Kubernetes, and the "
+            "difference between Compose and orchestration, is essential for backend, DevOps, and platform engineering roles."
+        ),
+        "real_world_example": (
+            "A web service needs three replicas for availability. In Docker Swarm you run `docker service create "
+            "--replicas 3 --name web -p 8080:80 myweb:1.0`. Swarm keeps three instances running, routes traffic "
+            "between them, and restarts any that fail. In Kubernetes you would write a Deployment and a Service YAML."
+        ),
+        "common_mistake": (
+            "Do not use Docker Compose for production multi-host deployments. Compose is designed for single-host "
+            "development and small deployments; orchestrators handle clustering, self-healing, and production scaling."
+        ),
+        "worked_example": (
+            "The example initializes a Swarm, creates a replicated service, inspects it, and scales it from 3 to 5 replicas."
+        ),
+        "depth_note": "Canonical advanced content; it is fixed by the curated knowledge base, not generated for a target role.",
+        "version_note": (
+            "Examples use Docker Swarm commands from Docker Engine 23+. Kubernetes examples are conceptual only. "
+            "SkillBridge does not execute Docker commands."
+        ),
+        "grounding_sources": [
+            {"title": "Docker Swarm overview", "url": "https://docs.docker.com/engine/swarm/", "source": "Docker documentation"},
+            {"title": "Kubernetes overview", "url": "https://kubernetes.io/docs/concepts/overview/", "source": "Kubernetes documentation"},
+        ],
+    },
+    "example": {
+        "title": "Create a replicated service in Docker Swarm",
+        "type": "bash",
+        "content": (
+            "# Initialize a single-node swarm for learning\n"
+            "docker swarm init\n"
+            "\n"
+            "# Create a service with 3 replicas\n"
+            "docker service create --name web --replicas 3 -p 8080:80 nginx:1.27\n"
+            "\n"
+            "# List services and their replicas\n"
+            "docker service ls\n"
+            "docker service ps web\n"
+            "\n"
+            "# Scale to 5 replicas\n"
+            "docker service scale web=5\n"
+            "\n"
+            "# Remove the service\n"
+            "docker service rm web"
+        ),
+        "explanation": (
+            "Swarm maintains the desired number of replicas, routes port 8080 to them, and replaces failed tasks. "
+            "This is for learning and small setups; production clusters usually use Kubernetes. Worked example for "
+            "reading — SkillBridge does not run these commands."
+        ),
+    },
+    "practice": {
+        "type": "practical",
+        "title": "Choose between Compose and an orchestrator for production",
+        "task": (
+            "Your team currently runs a development stack with Docker Compose on one developer laptop. You need to "
+            "deploy to production with three replicas, automatic restart on failure, and zero-downtime updates. "
+            "Explain in two or three sentences whether Docker Compose or an orchestrator (Swarm or Kubernetes) is "
+            "appropriate, and why. Then write the Docker Swarm command to create a service named `api` with 3 replicas, "
+            "publishing host port 8080 to container port 3000, from image `myapi:1.0`. SkillBridge reviews your answer "
+            "as text only — it never executes commands."
+        ),
+        "response_type": "command",
+        "competency": "Orchestration basics",
+        "evaluation_note": (
+            "Static text review only: SkillBridge checks for an explanation that Compose is for single-host development "
+            "while orchestrators handle clustering, self-healing, and rolling updates, plus the command "
+            "`docker service create --name api --replicas 3 -p 8080:3000 myapi:1.0`. It does not run Docker, so the "
+            "review cannot prove runtime results. A strong answer names Swarm or Kubernetes and explains replicas, "
+            "self-healing, or load balancing. A weak answer recommends Compose for production clustering or omits the "
+            "replicas flag."
+        ),
+    },
+    "mini_check": {
+        "questions": [
+            {"id": "o1", "type": "mcq", "question": "What is the main job of a container orchestrator?", "options": ["Deploy, scale, and keep containers healthy across a cluster", "Build Docker images faster", "Replace Dockerfiles", "Run containers only on one machine"], "correct_answer": "Deploy, scale, and keep containers healthy across a cluster", "competency": "Orchestration basics", "difficulty": "beginner", "misconception_hint": "Orchestrators manage the lifecycle of containers at scale, not the build process."},
+            {"id": "o2", "type": "mcq", "question": "Which command creates a Docker Swarm service with 3 replicas?", "options": ["docker service create --name web --replicas 3 ...", "docker compose up --replicas 3", "docker run --replicas 3", "docker swarm create --replicas 3"], "correct_answer": "docker service create --name web --replicas 3 ...", "competency": "Orchestration basics", "difficulty": "beginner", "misconception_hint": "Swarm services are created with docker service, not docker run or docker compose."},
+            {"id": "o3", "type": "mcq", "question": "When should you move from Docker Compose to an orchestrator?", "options": ["When you need multi-host clustering, self-healing, and production scaling", "When you want to develop locally", "When you have only one container", "When you want to avoid YAML files"], "correct_answer": "When you need multi-host clustering, self-healing, and production scaling", "competency": "Orchestration basics", "difficulty": "beginner", "misconception_hint": "Compose and orchestrators serve different environments and scales."},
+        ]
+    },
+    "locales": {
+        "ar": {
+            "learn": {
+                "title": "أساسيات الـ Orchestration",
+                "explanation": "تشغيل حاوية واحدة على جهاز واحد سهل. لكن تشغيل عشرات أو مئات الحاويات على أجهزة كتير، والحفاظ على صحتها، وتوزيع الترافيك، وتحديثها من غير downtime بيتطلب **orchestration**. Docker Swarm هو الـ orchestrator المدمج في Docker؛ Kubernetes هو المنصة القياسية في الصناعة. الاتنين بيديروا **services** — مجموعات منطقية من حاويات متطابقة — بدل الحاويات الفردية.",
+                "key_ideas": [
+                    "الـ Orchestrators بيحطوا الحاويات في cluster، يعيدوا تشغيل اللي بيفشلوا، ويعملوا scale up/down.",
+                    "الـ Service في Swarm أو Kubernetes هو حالة مطلوبة: 'شغّل 3 replicas من الحاوية دي'.",
+                    "الـ Load balancing بيوزّع الترافيك على الـ replicas عشان مفيش حاوية تتضغط لوحدها.",
+                    "الـ Self-healing يعني الـ orchestrator بيستبدل الحاويات اللي بتcrash أو تبقى unhealthy.",
+                    "Docker Compose رائع للتطوير المحلي على جهاز واحد؛ الـ Orchestrators بيديروا clusters الإنتاج.",
+                ],
+                "key_terms": {"orchestration": "الإدارة الآلية لنشر الحاويات وscaling وشبكاتها وصحتها.", "cluster": "مجموعة من الأجهزة (nodes) بتشغّل حاويات تحت إدارة orchestrator.", "service": "مجموعة منطقية من حاويات متطابقة بتشارك اسم وسياسة scaling.", "replica": "نسخة شغالة واحدة من service.", "self-healing": "قدرة الـ orchestrator على اكتشاف واستبدال الحاويات الفاشلة تلقائيًا.", "rolling update": "استبدال الحاويات القديمة بالجديدة تدريجيًا لتجنب downtime."},
+                "job_relevance": "أنظمة الإنتاج بتشتغل على orchestrators. فهم أساسيات Swarm وKubernetes، والفرق بين Compose والـ orchestration، ضروري لمهام backend وDevOps وplatform engineering.",
+                "real_world_example": "خدمة ويب محتاجة 3 replicas للتوفر. في Docker Swarm بتشغّل `docker service create --replicas 3 --name web -p 8080:80 myweb:1.0`. Swarm بيحافظ على 3 instances، يوجّه الترافيك بينهم، ويعيد تشغيل أي حاوية بتفشل. في Kubernetes هتكتب Deployment وService YAML.",
+                "common_mistake": "ما تستخدمش Docker Compose للنشر الإنتاجي متعدد الأجهزة. Compose مصمم للتطوير المحلي على جهاز واحد والنشرات الصغيرة؛ الـ orchestrators بتتعامل مع clustering وself-healing وscaling الإنتاج.",
+                "worked_example": "المثال بيعمل initialize لـ Swarm، ينشئ service مكرّر، يفحصه، ويعمل له scale من 3 لـ 5 replicas.",
+                "depth_note": "محتوى متقدم ثابت من قاعدة المعرفة المراجَعة، مش محتوى مولّد حسب الوظيفة.",
+                "version_note": "الأمثلة تستخدم أوامر Docker Swarm من Docker Engine 23+. أمثلة Kubernetes هي مفاهيمية فقط. SkillBridge ما بينفّذش أوامر Docker.",
+                "grounding_sources": [
+                    {"title": "نظرة عامة على Docker Swarm", "url": "https://docs.docker.com/engine/swarm/", "source": "Docker documentation"},
+                    {"title": "نظرة عامة على Kubernetes", "url": "https://kubernetes.io/docs/concepts/overview/", "source": "Kubernetes documentation"},
+                ],
+            },
+            "example": {
+                "title": "اعمل service مكرّر في Docker Swarm",
+                "type": "bash",
+                "content": "# Initialize a single-node swarm for learning\ndocker swarm init\n\n# Create a service with 3 replicas\ndocker service create --name web --replicas 3 -p 8080:80 nginx:1.27\n\n# List services and their replicas\ndocker service ls\ndocker service ps web\n\n# Scale to 5 replicas\ndocker service scale web=5\n\n# Remove the service\ndocker service rm web",
+                "explanation": "Swarm بيحافظ على العدد المطلوب من الـ replicas، يوجّه بورت 8080 ليهم، ويستبدل الـ tasks اللي بتفشل. ده للتعلم والإعدادات الصغيرة؛ clusters الإنتاج عادة بيستخدموا Kubernetes. مثال للقراية — SkillBridge ما بينفّذش الأوامر دي.",
+            },
+            "practice": {
+                "title": "اختار بين Compose و orchestrator للإنتاج",
+                "task": "فريقك حاليًا بيشغّل stack التطوير بـ Docker Compose على لابتوب مطوّر واحد. محتاج تنشر للإنتاج بـ 3 replicas، restart تلقائي لما يحصل فشل، وتحديثات من غير downtime. اشرح في جملتين أو تلاتة هل Docker Compose ولا orchestrator (Swarm أو Kubernetes) مناسب، وليه. وبعدين اكتب أمر Docker Swarm عشان تعمل service اسمها `api` بـ 3 replicas، تنشر بورت 8080 على الجهاز لبورت 3000، من صورة `myapi:1.0`. SkillBridge بيراجع إجابتك كنص بس — مش بينفّذ الأوامر.",
+                "response_type": "command",
+                "competency": "Orchestration basics",
+                "evaluation_note": "مراجعة نصية ثابتة فقط: SkillBridge بيتأكد من شرح إن Compose للتطوير المحلي على جهاز واحد بينما الـ orchestrators بيديروا clustering وself-healing وrolling updates، بالإضافة للأمر `docker service create --name api --replicas 3 -p 8080:3000 myapi:1.0`. مش بيشغّل Docker، فالمراجعة ما بتثبتش نتيجة تشغيل. الإجابة القوية بتسمّي Swarm أو Kubernetes وتشرح replicas أو self-healing أو load balancing. الإجابة الضعيفة بتنصح بـ Compose للنشر الإنتاجي متعدد الأجهزة أو تنسى فلاغ الـ replicas.",
+            },
+            "mini_check": {"questions": [
+                {"id": "o1", "question": "إيه الوظيفة الرئيسية لـ container orchestrator؟", "options": ["ينشر ويعمل scale ويحافظ على صحة الحاويات في cluster", "يبني صور Docker بسرعة", "يستبدل Dockerfiles", "يشغّل حاويات على جهاز واحد بس"], "misconception_hint": "الـ Orchestrators بيديروا lifecycle الحاويات على نطاق واسع، مش عملية الـ build."},
+                {"id": "o2", "question": "أي أمر بيعمل Docker Swarm service بـ 3 replicas؟", "options": ["docker service create --name web --replicas 3 ...", "docker compose up --replicas 3", "docker run --replicas 3", "docker swarm create --replicas 3"], "misconception_hint": "خدمات Swarm بتتعمل بـ docker service، مش docker run أو docker compose."},
+                {"id": "o3", "question": "إمتى لازم تنتقل من Docker Compose لـ orchestrator؟", "options": ["لما تحتاج multi-host clustering وself-healing وscaling إنتاجي", "لما عايز تطوّر محليًا", "لما عندك حاوية واحدة بس", "لما عايز تتجنب ملفات YAML"], "misconception_hint": "Compose والـ orchestrators بيخدموا environments وأحجام مختلفة."},
+            ]},
+        },
+    },
+}
+
+
 def curated_diagnostic_questions(skill_name, competencies):
     """Return reviewed diagnostic questions for complete curated topics.
 
@@ -1720,6 +2223,16 @@ def curated_diagnostic_questions(skill_name, competencies):
         ],
         "compose": [
             {"type": "mcq", "question": "Which command starts a Compose stack in the background using the modern plugin syntax?", "options": ["docker compose up -d", "docker-compose up -d", "docker compose start", "docker run compose up"], "correct_answer": "docker compose up -d", "competency": "compose", "difficulty": "beginner"},
+        ],
+        # Docker Batch 4 — one reviewed diagnostic question per newly complete topic.
+        "multi-stage builds": [
+            {"type": "mcq", "question": "What is the main purpose of a multi-stage build?", "options": ["Keep build tools out of the final image", "Make the build run on multiple machines", "Increase the number of layers", "Allow containers to share networks"], "correct_answer": "Keep build tools out of the final image", "competency": "multi-stage_builds", "difficulty": "beginner"},
+        ],
+        "security & secrets": [
+            {"type": "mcq", "question": "Why is `COPY .env .` in a Dockerfile dangerous?", "options": ["The secret becomes part of the image history", "It makes the container run slower", "It prevents the container from starting", "It disables networking"], "correct_answer": "The secret becomes part of the image history", "competency": "security_&_secrets", "difficulty": "beginner"},
+        ],
+        "orchestration basics": [
+            {"type": "mcq", "question": "What is the main job of a container orchestrator?", "options": ["Deploy, scale, and keep containers healthy across a cluster", "Build Docker images faster", "Replace Dockerfiles", "Run containers only on one machine"], "correct_answer": "Deploy, scale, and keep containers healthy across a cluster", "competency": "orchestration_basics", "difficulty": "beginner"},
         ],
     }
     if skill_key in PYTHON_FUNCTIONS["skill_aliases"]:
@@ -1777,6 +2290,12 @@ def complete_lesson(skill_name, competency):
         return deepcopy(DOCKER_NETWORKING)
     if _key(skill_name) in DOCKER_COMPOSE["skill_aliases"] and _key(competency) in ("compose",):
         return deepcopy(DOCKER_COMPOSE)
+    if _key(skill_name) in DOCKER_MULTI_STAGE_BUILDS["skill_aliases"] and _key(competency) in ("multi-stage builds",):
+        return deepcopy(DOCKER_MULTI_STAGE_BUILDS)
+    if _key(skill_name) in DOCKER_SECURITY_SECRETS["skill_aliases"] and _key(competency) in ("security & secrets",):
+        return deepcopy(DOCKER_SECURITY_SECRETS)
+    if _key(skill_name) in DOCKER_ORCHESTRATION_BASICS["skill_aliases"] and _key(competency) in ("orchestration basics",):
+        return deepcopy(DOCKER_ORCHESTRATION_BASICS)
     return None
 
 

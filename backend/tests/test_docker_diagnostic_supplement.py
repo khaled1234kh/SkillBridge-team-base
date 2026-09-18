@@ -75,16 +75,19 @@ def test_docker_diagnostic_offline_covers_all_11_topics(client, aisha_id,
     assert len(qs) == 15, f"expected 15 questions (curated banks + one probe per remaining competency), got {len(qs)}"
     assert actual == expected, f"missing/extra competencies: {expected ^ actual}"
 
-    # Curated Docker topics (Batch 1 + Batch 2 + Batch 3) are MCQs from the reviewed bank
-    curated_topics = {"containers", "images", "basic_commands", "dockerfile", "ports", "volumes", "networking", "compose"}
+    # All 11 Docker blueprint topics now have curated MCQ banks.
+    curated_topics = {
+        "containers", "images", "basic_commands", "dockerfile", "ports",
+        "volumes", "networking", "compose", "multi-stage_builds",
+        "security_&_secrets", "orchestration_basics",
+    }
     curated = [q for q in qs if q["competency"] in curated_topics]
-    assert len(curated) == 12
+    assert len(curated) == 15
     assert all(q["type"] == "mcq" for q in curated)
 
-    # Remaining topics fall back to free-text probes when offline
+    # No uncovered topics remain, so there are no fallback free-text probes.
     fallback = [q for q in qs if q["competency"] not in curated_topics]
-    assert len(fallback) == 3
-    assert all(q["type"] == "free_text" for q in fallback)
+    assert len(fallback) == 0
 
 
 def test_docker_diagnostic_no_duplicate_competency_coverage(client, aisha_id,
