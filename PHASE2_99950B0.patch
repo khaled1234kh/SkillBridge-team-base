@@ -1,0 +1,1147 @@
+diff --git a/backend/app/career_roadmap.py b/backend/app/career_roadmap.py
+index dda9767..1967fc9 100644
+--- a/backend/app/career_roadmap.py
++++ b/backend/app/career_roadmap.py
+@@ -370,10 +370,10 @@ def build_career_roadmap(student, role):
+     return {
+         "role_title": role_title,
+         "resources_version": 4,
+-        "summary": (f"A complete, start-to-finish path from zero to a "
+-                    f"job-ready {role_title}. Finish every phase and you'll have "
+-                    f"the skills, verified evidence, portfolio and interview "
+-                    f"readiness to apply with confidence."),
++        "summary": (f"A complete, start-to-finish path toward a job-ready "
++                    f"{role_title}. Each phase builds a skill; verified evidence "
++                    f"comes only from passing the Final Assessments, so work "
++                    f"through the phases to earn it."),
+         "student_starting_point": ready,
+         "phase_count": len(phases),
+         "phases": phases,
+@@ -395,7 +395,8 @@ def _checkpoint(idx, ready, role_title, software=True):
+         if idx == 5:
+             return "You have a polished case study or portfolio piece you can discuss in an interview."
+         if idx == 6:
+-            return "You have passed the role's skill assessments and can share verified proof."
++            return ("Once you pass the role's Final Assessments, you can share "
++                    "verified proof. Until then, any level here is self-reported.")
+         if idx == 7:
+             return "You can communicate decisions and respond to stakeholder feedback on realistic tasks."
+         if idx == 8:
+@@ -416,7 +417,8 @@ def _checkpoint(idx, ready, role_title, software=True):
+     if idx == 5:
+         return "You have a deployed, documented, portfolio-ready project you can demo in an interview."
+     if idx == 6:
+-        return "You have passed the role's skill assessments and can share verified proof."
++        return ("Once you pass the role's Final Assessments, you can share "
++                "verified proof. Until then, any level here is self-reported.")
+     if idx == 7:
+         return "You can describe your experience and work with a team on realistic tasks."
+     if idx == 8:
+diff --git a/backend/app/main.py b/backend/app/main.py
+index 9dad90c..c743f67 100644
+--- a/backend/app/main.py
++++ b/backend/app/main.py
+@@ -70,7 +70,7 @@ from fastapi.exceptions import RequestValidationError
+ from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse, JSONResponse
+ from starlette.exceptions import HTTPException as StarletteHTTPException
+ 
+-from . import models, matching, genai, integrity, seed, auth as auth_mod, mailer, activity, jobs, career_roadmap, diagnostics, path_builder, lessons, coverage, skill_blueprint, knowledge_base, learning_orchestrator, tts, copilot, escoe, practice, recommendations, scenarios, esco_import, role_mapping, match_explain, tutor_memory
++from . import models, matching, metrics, genai, integrity, seed, auth as auth_mod, mailer, activity, jobs, career_roadmap, diagnostics, path_builder, lessons, coverage, skill_blueprint, knowledge_base, learning_orchestrator, tts, copilot, escoe, practice, recommendations, scenarios, esco_import, role_mapping, match_explain, tutor_memory
+ from .resources import _CHECK_CACHE, annotate_resources
+ from .database import init_db, get_cursor, applied_migrations
+ 
+@@ -703,6 +703,19 @@ def api_create_skill(request: Request, body: dict):
+     return models.create_skill(name, category)
+ 
+ 
++# ------------------------------------------------------------------ metrics
++
++@app.get("/api/metrics/definitions")
++def api_metric_definitions(request: Request):
++    """The canonical score registry: one key/label/formula per displayed metric.
++
++    The frontend reads names and explainers from here (and from each analysis
++    payload) so a metric is never relabelled or recomputed inconsistently.
++    """
++    _current_user(request)
++    return {"metrics": metrics.definitions(), "canonical": list(metrics.CANONICAL_METRICS)}
++
++
+ # ------------------------------------------------------------------ companies
+ 
+ @app.get("/api/companies")
+@@ -2706,24 +2719,35 @@ def api_final_assessment_status(student_id: int, skill_id: int, request: Request
+     role = student.get("target_role") or {}
+     required_level = _path_required_level(student, role, skill_id)
+ 
+-    diag = models.get_latest_diagnostic(student_id, skill_id)
++    # Key off the latest COMPLETED diagnostic, never a newer unanswered one.
++    diag = models.get_latest_completed_diagnostic(student_id, skill_id)
+     diag_ready = False
+     topics = []
+-    if diag and diag.get("completed_at"):
++    if diag:
+         topics = (models.public_diagnostic(diag).get("topic_results") or [])
+         diag_ready = True
++    latest_diagnostic_id = diag["id"] if diag else None
+ 
+     path = models.get_personalized_path(student_id, skill_id)
+     path_items = []
+     path_progress = []
+     skipped = []
+     path_ready = False
++    path_stale = False
+     if path:
+-        items = json.loads(path.get("items")) if isinstance(path.get("items"), str) else path.get("items") or []
+-        path_items = items
+-        path_progress = json.loads(path.get("progress")) if isinstance(path.get("progress"), str) else path.get("progress") or []
+-        skipped = json.loads(path.get("skipped_mastered")) if isinstance(path.get("skipped_mastered"), str) else path.get("skipped_mastered") or []
++        # A path belongs to one diagnostic. If a newer completed diagnostic
++        # supersedes it, the stale path must never satisfy requirements on its
++        # own — only the current completed diagnostic evidence counts.
++        path_diagnostic_id = path.get("diagnostic_id")
++        path_stale = (latest_diagnostic_id is not None
++                      and path_diagnostic_id is not None
++                      and path_diagnostic_id != latest_diagnostic_id)
+         path_ready = True
++        if not path_stale:
++            items = json.loads(path.get("items")) if isinstance(path.get("items"), str) else path.get("items") or []
++            path_items = items
++            path_progress = json.loads(path.get("progress")) if isinstance(path.get("progress"), str) else path.get("progress") or []
++            skipped = json.loads(path.get("skipped_mastered")) if isinstance(path.get("skipped_mastered"), str) else path.get("skipped_mastered") or []
+ 
+     readiness = coverage.final_assessment_ready(
+         skill["name"], required_level, topics, path_items, path_progress, skipped)
+@@ -2733,6 +2757,8 @@ def api_final_assessment_status(student_id: int, skill_id: int, request: Request
+         "required_level": required_level,
+         "diagnostic_completed": diag_ready,
+         "path_exists": path_ready,
++        "path_stale": path_stale,
++        "latest_diagnostic_id": latest_diagnostic_id,
+         "has_blueprint": skill_blueprint.has_blueprint(skill["name"]),
+         "readiness": readiness,
+     }
+diff --git a/backend/app/match_explain.py b/backend/app/match_explain.py
+index 8e4ae79..65eb276 100644
+--- a/backend/app/match_explain.py
++++ b/backend/app/match_explain.py
+@@ -24,7 +24,7 @@ Honesty rules (locked by tests):
+ """
+ import datetime
+ 
+-from . import jobs, matching, recommendations
++from . import jobs, matching, metrics, recommendations
+ 
+ TARGET_ROLE_MATCH_FORMULA = "target-role-match"
+ TARGET_ROLE_MATCH_VERSION = "target-role-match-v1"
+@@ -131,8 +131,10 @@ def target_role_match_breakdown(student):
+                  "No score was changed; refusing to present a wrong sum.")
+     missing_rows = [d for d in detail if d["status"] == "missing"]
+     gap_rows = [d for d in detail if d["status"] == "gap"]
+-    if not missing_rows and not gap_rows:
+-        next_action = "You meet this role's skill requirements — keep your evidence current."
++    complete = not missing_rows and not gap_rows
++    if complete:
++        next_action = ("Your evidence currently meets this role's requirements — "
++                       "keep it current and verify where you can.")
+     else:
+         first = (missing_rows or gap_rows)[0]
+         verb = "Learn or verify" if first["status"] == "missing" else "Close the gap on"
+@@ -141,6 +143,9 @@ def target_role_match_breakdown(student):
+     return {
+         "formula": TARGET_ROLE_MATCH_FORMULA,
+         "version": TARGET_ROLE_MATCH_VERSION,
++        "metric_key": metrics.TARGET_REQUIREMENT_COVERAGE,
++        "metric_label": metrics.definitions()[metrics.TARGET_REQUIREMENT_COVERAGE]["label"],
++        "complete": complete,
+         "as_of": _as_of(),
+         "role_data_version": _role_data_version(role),
+         "role_title": role.get("title"),
+@@ -245,6 +250,8 @@ def role_match_breakdown(student, query):
+     return {
+         "formula": ROLE_MATCH_FORMULA,
+         "version": ROLE_MATCH_VERSION,
++        "metric_key": metrics.TARGET_REQUIREMENT_COVERAGE,
++        "metric_label": metrics.definitions()[metrics.TARGET_REQUIREMENT_COVERAGE]["label"],
+         "as_of": _as_of(),
+         "role_data_version": rec.get("source_version") or "local",
+         "role_id": rec.get("role_id"),
+@@ -392,10 +399,13 @@ def job_match_breakdown(student, fingerprint, location="", country="", market=""
+     elif not constraints["location"]["supported"]:
+         next_action = "Consider adding this market as a relocation/remote search."
+     else:
+-        next_action = "This is a strong current fit."
++        next_action = ("This is a keyword-level fit, not an evidence claim — verify "
++                       "a matched skill to strengthen it.")
+     return {
+         "formula": JOB_MATCH_FORMULA,
+         "version": JOB_MATCH_VERSION,
++        "metric_key": metrics.CATALOGUE_SIMILARITY,
++        "metric_label": "Job posting match",
+         "as_of": _as_of(),
+         "role_data_version": _role_data_version(student.get("target_role")),
+         "role_title": role_title,
+diff --git a/backend/app/matching.py b/backend/app/matching.py
+index 626fbc0..e3f2ac8 100644
+--- a/backend/app/matching.py
++++ b/backend/app/matching.py
+@@ -213,6 +213,10 @@ def analyze_student(student_id):
+         return None
+     analysis = categorize(student, role)
+     score = job_match_score(student, role)
++    # Canonical metric layer (Phase 2): one name/formula/value per concept, and
++    # a gap can never coexist with a "requirements met" claim. Imported lazily to
++    # avoid the metrics<->matching import cycle at module load time.
++    from . import metrics
+     return {
+         "student_id": student_id,
+         "role_id": role["id"],
+@@ -221,4 +225,8 @@ def analyze_student(student_id):
+         "match_score": score,
+         "skill_gaps": analysis,
+         "gap_count": len([a for a in analysis if a["status"] != "strong"]),
++        "metrics": metrics.bundle(student, role),
++        "metric_definitions": metrics.definitions(),
++        "all_requirements_met": metrics.all_requirements_met(student, role),
++        "missing_requirements": metrics.missing_requirements(student, role),
+     }
+diff --git a/backend/app/metrics.py b/backend/app/metrics.py
+new file mode 100644
+index 0000000..23c9659
+--- /dev/null
++++ b/backend/app/metrics.py
+@@ -0,0 +1,165 @@
++"""Canonical metric registry (data-truth layer).
++
++Every score the product shows a student is one of a small, named set of metrics.
++Before this module the same underlying ideas were labelled generically as
++"match" in several places, and a few of them were recomputed in the browser from
++different inputs, so the same role could show 100% on one page and 88% on
++another while a real requirement gap was still visible.
++
++Rules locked by tests (``test_data_truth_phase2.py``):
++
++  - One metric -> one key, one label, one formula, one rounding rule.
++  - The backend is the single source of truth; the frontend never recomputes a
++    score from raw counts.
++  - A visible gap (``gap`` or ``missing``) prevents any "complete requirement
++    coverage" claim: ``all_requirements_met`` is False and the coverage metric
++    is below 100.0.
++  - The four evidence tiers stay distinct: self-reported, CV-detected,
++    practiced/topic-completed, and officially verified. Only a passed Final
++    Assessment writes a ``verified_skills`` row.
++
++Metrics
++-------
++- ``target_requirement_coverage``: level-aware, partial-credit coverage of the
++  target role's required skills (the Dashboard ring). 1 decimal.
++- ``career_readiness``: same evidence, all-or-nothing per requirement (share of
++  requirements actually met at/above level). 1 decimal. Never implies verified.
++- ``verified_evidence_coverage``: share of required skills with official
++  verified evidence. 1 decimal. The only metric backed by assessments.
++- ``catalogue_similarity``: name-only overlap between a role's required skills
++  and a profile's skill names. NOT a competence or verification claim; used only
++  as a labelled fallback for catalogue roles that are not scored by the
++  recommendation engine.
++"""
++from . import matching
++
++TARGET_REQUIREMENT_COVERAGE = "target_requirement_coverage"
++CAREER_READINESS = "career_readiness"
++VERIFIED_EVIDENCE_COVERAGE = "verified_evidence_coverage"
++CATALOGUE_SIMILARITY = "catalogue_similarity"
++
++_METRIC_DEFINITIONS = {
++    TARGET_REQUIREMENT_COVERAGE: {
++        "key": TARGET_REQUIREMENT_COVERAGE,
++        "label": "Target requirement coverage",
++        "short_label": "Requirement coverage",
++        "formula": ("sum(credit per required skill) / count(required skills) "
++                    "* 100, rounded to 1 decimal"),
++        "evidence": ("Best available evidence per skill (verified > self-reported). "
++                     "Full credit at/above the required level, partial credit for "
++                     "progress below it, reduced credit for adjacent-name evidence."),
++        "rounding": "1 decimal",
++        "complete_when": "100.0 with no gap or missing rows",
++    },
++    CAREER_READINESS: {
++        "key": CAREER_READINESS,
++        "label": "Career readiness (requirements met)",
++        "short_label": "Requirements met",
++        "formula": ("count(required skills at/above the required level) / "
++                    "count(required skills) * 100, rounded to 1 decimal"),
++        "evidence": ("Same per-skill evidence as target requirement coverage, but "
++                     "each requirement is all-or-nothing (no partial credit). It is "
++                     "not a verified claim."),
++        "rounding": "1 decimal",
++        "complete_when": "100.0 (every requirement is met at or above its level)",
++    },
++    VERIFIED_EVIDENCE_COVERAGE: {
++        "key": VERIFIED_EVIDENCE_COVERAGE,
++        "label": "Verified evidence coverage",
++        "short_label": "Verified coverage",
++        "formula": ("count(required skills backed by a passed Final Assessment) / "
++                    "count(required skills) * 100, rounded to 1 decimal"),
++        "evidence": ("Only ``verified_skills`` rows (earned by passing a Final "
++                     "Assessment) count. Self-reported, CV-detected, practiced and "
++                     "topic-completed skills never count here."),
++        "rounding": "1 decimal",
++        "complete_when": "100.0 (every requirement has verified evidence)",
++    },
++    CATALOGUE_SIMILARITY: {
++        "key": CATALOGUE_SIMILARITY,
++        "label": "Catalogue similarity",
++        "short_label": "Skill-name overlap",
++        "formula": ("count(required skill names present in the profile by exact "
++                    "name) / count(required skills) * 100, rounded to 1 decimal"),
++        "evidence": ("Name presence only (self-reported or CV-detected). It is NOT "
++                     "a level or verification claim and is never shown as a "
++                     "verified match."),
++        "rounding": "1 decimal",
++        "complete_when": ("Never treated as completion; name overlap is not proof "
++                          "of competence"),
++    },
++}
++
++CANONICAL_METRICS = (
++    TARGET_REQUIREMENT_COVERAGE,
++    CAREER_READINESS,
++    VERIFIED_EVIDENCE_COVERAGE,
++    CATALOGUE_SIMILARITY,
++)
++
++
++def definitions():
++    """A deep-enough copy of the registry for API consumers (tooltips/explainers)."""
++    return {key: dict(value) for key, value in _METRIC_DEFINITIONS.items()}
++
++
++def _pct(numerator, denominator):
++    if not denominator:
++        return 0.0
++    return round((numerator / denominator) * 100.0, 1)
++
++
++def target_requirement_coverage(student, role):
++    """Level-aware, partial-credit coverage of the target role's requirements."""
++    if not role or not role.get("required_skills"):
++        return 0.0
++    return round(float(matching.job_match_score(student, role)), 1)
++
++
++def career_readiness(student, role):
++    """Share of requirements actually met at/above level (all-or-nothing)."""
++    rows = matching.categorize(student, role)
++    if not rows:
++        return 0.0
++    return _pct(len([r for r in rows if r["status"] == "strong"]), len(rows))
++
++
++def verified_evidence_coverage(student, role):
++    """Share of requirements backed by an official passed-assessment record."""
++    rows = matching.categorize(student, role)
++    if not rows:
++        return 0.0
++    return _pct(len([r for r in rows if r.get("verified")]), len(rows))
++
++
++def catalogue_similarity(role, profile_skill_names):
++    """Name-only overlap. Never a competence or verification claim."""
++    required = (role or {}).get("required_skills") or []
++    if not required:
++        return 0.0
++    names = {str(n).strip().lower() for n in (profile_skill_names or []) if n}
++    present = sum(
++        1 for rs in required
++        if str(rs.get("name") or "").strip().lower() in names)
++    return _pct(present, len(required))
++
++
++def all_requirements_met(student, role):
++    """True only when every required skill is met at/above its level."""
++    rows = matching.categorize(student, role)
++    return bool(rows) and all(r["status"] == "strong" for r in rows)
++
++
++def missing_requirements(student, role):
++    """Names of required skills that are not yet met (gap or missing)."""
++    return [r["skill_name"] for r in matching.categorize(student, role)
++            if r["status"] != "strong"]
++
++
++def bundle(student, role):
++    """The canonical metric values for a student/target-role pair."""
++    return {
++        TARGET_REQUIREMENT_COVERAGE: target_requirement_coverage(student, role),
++        CAREER_READINESS: career_readiness(student, role),
++        VERIFIED_EVIDENCE_COVERAGE: verified_evidence_coverage(student, role),
++    }
+diff --git a/backend/tests/test_data_truth_phase2.py b/backend/tests/test_data_truth_phase2.py
+new file mode 100644
+index 0000000..f3ace3b
+--- /dev/null
++++ b/backend/tests/test_data_truth_phase2.py
+@@ -0,0 +1,222 @@
++"""Phase 2 — data truth, match consistency and trust language.
++
++Locks the guide's Phase 2 acceptance criteria:
++
++- one metric has one name/formula/value across pages (canonical registry);
++- a visible gap prevents any "complete requirement coverage" claim, so the
++  Junior AI Engineer case can no longer show 100% while Docker is a level gap;
++- name-only catalogue similarity is a distinct, non-competence metric;
++- verified-evidence coverage counts only passed Final Assessments;
++- a stale path is labelled and cannot satisfy Final Assessment readiness;
++- no education/profile statement is treated as proven competence;
++- trust language holds in English and Arabic.
++"""
++from urllib.parse import quote
++
++from app import career_roadmap, coverage, genai, matching, metrics, models
++
++
++# --------------------------------------------------------------------------
++# canonical metrics
++# --------------------------------------------------------------------------
++
++def test_canonical_registry_has_one_definition_per_metric():
++    defs = metrics.definitions()
++    assert set(defs) == set(metrics.CANONICAL_METRICS)
++    for key, d in defs.items():
++        assert d["key"] == key
++        assert d["label"] and d["short_label"]
++        assert d["formula"] and d["evidence"] and d["rounding"]
++
++
++def test_metric_definitions_endpoint_returns_registry(client, auth_headers):
++    h = auth_headers("aisha@student.edu")
++    r = client.get("/api/metrics/definitions", headers=h)
++    assert r.status_code == 200, r.text
++    body = r.json()
++    assert set(body["canonical"]) == set(metrics.CANONICAL_METRICS)
++    assert body["metrics"][metrics.TARGET_REQUIREMENT_COVERAGE]["label"] == \
++        "Target requirement coverage"
++
++
++def test_analysis_exposes_canonical_metrics(client, student_id, auth_headers):
++    h = auth_headers("aisha@student.edu")
++    r = client.get(f"/api/students/{student_id}/analysis", headers=h)
++    assert r.status_code == 200, r.text
++    a = r.json()
++    assert a["match_score"] == a["metrics"][metrics.TARGET_REQUIREMENT_COVERAGE]
++    assert set(a["metrics"]) == {
++        metrics.TARGET_REQUIREMENT_COVERAGE,
++        metrics.CAREER_READINESS,
++        metrics.VERIFIED_EVIDENCE_COVERAGE,
++    }
++    assert set(a["metric_definitions"]) == set(metrics.CANONICAL_METRICS)
++
++
++def test_visible_gap_blocks_complete_coverage_claim(student_id, db):
++    a = matching.analyze_student(student_id)
++    assert a is not None
++    gaps = [g for g in a["skill_gaps"] if g["status"] != "strong"]
++    assert gaps, "the seed student must have an open requirement for this contract"
++    assert a["metrics"][metrics.TARGET_REQUIREMENT_COVERAGE] < 100.0
++    assert a["metrics"][metrics.CAREER_READINESS] < 100.0
++    assert a["all_requirements_met"] is False
++    assert a["missing_requirements"]
++
++
++def test_catalogue_similarity_is_name_only_and_never_complete(student_id, db):
++    """The Junior AI Engineer contradiction: Docker is present by name but below
++    the required level, so name overlap reads 100% while real coverage does not."""
++    student = models.get_student(student_id)
++    role = student["target_role"]
++    names = ([s["name"] for s in student["self_reported_skills"]]
++             + [v["name"] for v in student["verified_skills"]])
++    assert "Docker" in names
++    sim = metrics.catalogue_similarity(role, names)
++    cov = metrics.target_requirement_coverage(student, role)
++    assert sim > cov
++    assert cov < 100.0
++    assert metrics.all_requirements_met(student, role) is False
++
++
++def test_verified_evidence_coverage_only_counts_passed_assessments(student_id, db):
++    db.execute("DELETE FROM verified_skills WHERE student_id=?", (student_id,))
++    db.commit()
++    student = models.get_student(student_id)
++    role = student["target_role"]
++    assert student["self_reported_skills"], "self-reported evidence must exist"
++    assert metrics.verified_evidence_coverage(student, role) == 0.0
++
++    docker = models.get_skill_by_name("Docker")
++    models.update_verified_skill(student_id, docker["id"], "Intermediate")
++    student = models.get_student(student_id)
++    total = len(role["required_skills"])
++    assert metrics.verified_evidence_coverage(student, role) == round(100.0 / total, 1)
++
++
++def test_frontend_does_not_recompute_match_from_raw_counts():
++    """Source contract: the target-role number must come from the backend metric."""
++    from contract_paths import WORKSPACE_ROOT
++    src = (WORKSPACE_ROOT / "frontend/src/pages/SkillsRolesPage.tsx").read_text()
++    assert "analysis?.metrics?.target_requirement_coverage" in src
++    assert "metrics?.target_requirement_coverage" in \
++        (WORKSPACE_ROOT / "frontend/src/pages/LearningPage.tsx").read_text()
++
++
++# --------------------------------------------------------------------------
++# stale path must never satisfy readiness
++# --------------------------------------------------------------------------
++
++def _completed_diagnostic(student_id, python, slugs):
++    questions = [{"idn": i, "competency": slug, "type": "mcq",
++                  "question": f"q{i}", "options": ["a", "b"], "correct_answer": "a"}
++                 for i, slug in enumerate(slugs)]
++    diag = models.create_diagnostic(student_id, python["id"], questions)
++    topics = [{"competency": slug, "label": slug.replace("_", " "),
++               "score": 0.0, "status": "weak", "correct": 0, "total": 1}
++              for slug in slugs]
++    return models.complete_diagnostic(diag["id"], [], 0.0, {
++        "overall_score": 0.0, "topics": topics,
++        "weak_topics": list(slugs), "strong_topics": []})
++
++
++def _path_items(slugs):
++    return [{"id": f"{slug}-{i}", "competency": slug, "title": slug.replace("_", " "),
++             "topic_status": "weak", "diagnostic_score": 0.0, "action": "learn",
++             "order": i, "estimated_minutes": 30, "state": "not_started"}
++            for i, slug in enumerate(slugs, start=1)]
++
++
++def test_stale_path_is_labelled_and_cannot_satisfy_readiness(
++        client, student_id, auth_headers):
++    h = auth_headers("aisha@student.edu")
++    python = models.get_skill_by_name("Python")
++    slugs = ["python_functions", "python_error_handling"]
++
++    older = _completed_diagnostic(student_id, python, slugs)
++    items = _path_items(slugs)
++    models.create_personalized_path(student_id, python["id"], older["id"],
++                                    "Intermediate", items, [], [])
++    # Mark every path item complete — without the stale guard this would make the
++    # Final Assessment "ready".
++    models.update_path_progress(student_id, python["id"],
++                                [it["id"] for it in items])
++
++    before = client.get(
++        f"/api/students/{student_id}/learning/{python['id']}/final-assessment/status",
++        headers=h).json()
++    assert before["path_stale"] is False
++    assert before["readiness"]["ready"] is True
++
++    # A newer completed diagnostic supersedes the path.
++    newer = _completed_diagnostic(student_id, python, slugs)
++    assert newer["id"] > older["id"]
++
++    after = client.get(
++        f"/api/students/{student_id}/learning/{python['id']}/final-assessment/status",
++        headers=h).json()
++    assert after["path_stale"] is True
++    assert after["latest_diagnostic_id"] == newer["id"]
++    # Stale path evidence is excluded: nothing is satisfied from the old path.
++    assert after["readiness"]["satisfied"] == []
++    assert after["readiness"]["ready"] is False
++
++    # The stale path itself is labelled through the public path payload too.
++    path = client.get(
++        f"/api/students/{student_id}/learning/{python['id']}/personalized-path",
++        headers=h).json()
++    assert path["stale"] is True
++    assert path["latest_diagnostic_id"] == newer["id"]
++
++
++# --------------------------------------------------------------------------
++# unsupported competence claims
++# --------------------------------------------------------------------------
++
++def test_roadmap_checkpoint_is_conditional_not_a_past_tense_claim(student_id, db):
++    student = models.get_student(student_id)
++    role = student["target_role"]
++    roadmap = career_roadmap.build_career_roadmap(student, role)
++    checkpoints = " ".join(p["checkpoint"] for p in roadmap["phases"])
++    assert "You have passed the role's skill assessments" not in checkpoints
++    assert "Once you pass the role's Final Assessments" in checkpoints
++    assert "from zero to a job-ready" not in roadmap["summary"]
++
++
++def test_education_is_never_treated_as_proven_competence(monkeypatch):
++    """A profile with only education (no skills) must not yield a proficiency claim."""
++    student_context = (
++        "Student: Layla\nUniversity: Cairo University\nEducation level: BSc Computer Science\n"
++        "Self-reported skills: (none)\nVerified skills: (none)\n"
++    )
++    for lang in ("en", "ar"):
++        reply = genai._verified_skills_fallback("nova", lang, student_context)
++        low = reply.lower()
++        assert "officially verified" in low or "رسمياً" in reply
++        # No skill may be asserted from the education fields.
++        assert "bsc" not in low and "cairo" not in low
++
++
++def test_match_explain_uses_canonical_labels_and_no_bare_fit_claim(student_id, db):
++    from app import match_explain
++    student = models.get_student(student_id)
++    target = match_explain.target_role_match_breakdown(student)
++    assert target["metric_key"] == metrics.TARGET_REQUIREMENT_COVERAGE
++    assert target["metric_label"] == "Target requirement coverage"
++    assert isinstance(target["complete"], bool)
++    if not target["complete"]:
++        assert target["next_action"].lower().startswith(("close the gap", "learn or verify"))
++
++
++# --------------------------------------------------------------------------
++# trust language, English and Arabic
++# --------------------------------------------------------------------------
++
++def test_trust_language_en_and_ar_distinguish_official_from_reported():
++    en = genai._verified_skills_fallback("nova", "en", None)
++    ar = genai._verified_skills_fallback("nova", "ar", None)
++    assert "no officially verified skills" in en.lower()
++    assert "user-reported" in en.lower()
++    assert "لا يعرض أي مهارات موثقة رسمياً" in ar
++    assert "ظل كلاماً منك" in ar
++    assert "official" in en.lower()
+diff --git a/backend/tests/test_runtime_data_truth_phase2_frontend.py b/backend/tests/test_runtime_data_truth_phase2_frontend.py
+new file mode 100644
+index 0000000..23088ff
+--- /dev/null
++++ b/backend/tests/test_runtime_data_truth_phase2_frontend.py
+@@ -0,0 +1,26 @@
++"""Phase 2 data-truth/language — frontend source-contract guard.
++
++Covers: canonical metric keys in the type layer, backend-sourced target
++coverage (no browser recomputation), distinctly labelled catalogue similarity,
++labelled stale paths, and a gap-aware completion claim.
++"""
++
++import shutil
++import subprocess
++
++import pytest
++
++from contract_paths import WORKSPACE_ROOT, checker_script, node_env
++
++
++def test_runtime_data_truth_phase2_frontend_contracts_hold():
++    node = shutil.which("node")
++    if not node:
++        pytest.skip("node is required to run SkillBridge but was not found")
++    script = checker_script("check-data-truth-phase2.mjs")
++    assert script.exists()
++    result = subprocess.run([node, str(script)], cwd=WORKSPACE_ROOT, capture_output=True,
++                            text=True, timeout=120, env=node_env())
++    assert result.returncode == 0, (
++        f"Data truth (Phase 2) frontend contracts broken:\n"
++        f"{result.stdout}\n{result.stderr}")
+diff --git a/frontend/scripts/check-data-truth-phase2.mjs b/frontend/scripts/check-data-truth-phase2.mjs
+new file mode 100644
+index 0000000..073c27a
+--- /dev/null
++++ b/frontend/scripts/check-data-truth-phase2.mjs
+@@ -0,0 +1,90 @@
++// Phase 2 — data truth, match consistency and trust language — source guard.
++//
++// Locks the frontend side of the canonical metric contract: the target-role
++// number is read from the backend, catalogue similarity is a separately
++// labelled name-overlap metric, a stale path is labelled, and no score is
++// recomputed from raw counts in the browser.
++
++import { readProject } from './path-helpers.mjs'
++
++const read = readProject
++
++const problems = []
++const ok = (cond, msg) => { if (!cond) problems.push(msg) }
++
++const roles = read('frontend/src/pages/SkillsRolesPage.tsx')
++const learning = read('frontend/src/pages/LearningPage.tsx')
++const dashboard = read('frontend/src/pages/DashboardPage.tsx')
++const widgets = read('frontend/src/components/widgets.tsx')
++const types = read('frontend/src/lib/types.ts')
++const css = read('frontend/src/index.css')
++
++// ---- 1. canonical metric keys exist in the type layer
++ok(/export type CanonicalMetricKey =/.test(types)
++   && /'target_requirement_coverage'/.test(types)
++   && /'catalogue_similarity'/.test(types)
++   && /'career_readiness'/.test(types)
++   && /'verified_evidence_coverage'/.test(types),
++   'types.ts defines the four canonical metric keys')
++ok(/export interface MetricDefinition/.test(types) && /metric_definitions\?:/.test(types),
++   'types.ts carries MetricDefinition + analysis.metric_definitions')
++ok(/all_requirements_met\?: boolean/.test(types) && /missing_requirements\?: string\[\]/.test(types),
++   'analysis carries all_requirements_met + missing_requirements')
++ok(/stale\?: boolean/.test(types) && /path_stale\?: boolean/.test(types),
++   'PersonalizedPath/FinalAssessmentStatus expose stale/path_stale')
++
++// ---- 2. Skills & Roles: target coverage comes from the backend
++ok(/const targetCoverage = analysis\?\.metrics\?\.target_requirement_coverage/.test(roles),
++   'targetPct is sourced from analysis.metrics.target_requirement_coverage')
++ok(!/const targetPct = cvSkillNames\.length/.test(roles),
++   'the old raw name-overlap targetPct recomputation is gone')
++ok(/all_requirements_met === true/.test(roles) && /missing_requirements/.test(roles),
++   'the target summary distinguishes complete coverage from open requirements')
++ok(/Target requirement coverage/.test(roles)
++   && /still open/.test(roles),
++   'the target gap section names Target requirement coverage and shows open requirements')
++ok(/catalogue_similarity/.test(roles) && /Catalogue similarity/.test(roles)
++   && /name overlap only/.test(roles),
++   'the name-overlap fallback is labelled Catalogue similarity and documented as non-competence')
++ok(/metric: 'target_requirement_coverage'/.test(roles)
++   && /metric: 'catalogue_similarity'/.test(roles),
++   'displayMatchOf records which canonical metric it returned')
++ok(/match\.metricLabel/.test(roles) && /metricLabel=\{displayMatch\(r\)\.metricLabel\}/.test(roles),
++   'cards/drawer render the metric label rather than a generic "match"')
++
++// ---- 3. Learning: backend coverage + labelled stale path
++ok(/analysis\?\.metrics\?\.target_requirement_coverage/.test(learning)
++   && /Current requirement coverage/.test(learning),
++   'Learning reads the backend coverage metric and labels it Requirement coverage')
++ok(!/allGaps\.filter\(\(g\) => g\.status === 'strong'\)\.length \/ allGaps\.length/.test(learning),
++   'Learning no longer recomputes a match from strong/total counts')
++ok(/path\.stale/.test(learning) && /pp-stale-note/.test(learning)
++   && /earlier diagnostic/.test(learning),
++   'Learning labels a stale path instead of showing it as current')
++ok(/finalStatus\.path_stale/.test(learning) && /not counted here/.test(learning),
++   'Final Assessment coverage notes that stale path topics do not count')
++
++// ---- 4. Dashboard: one named metric + gap-aware completion copy
++ok(/Target requirement coverage/.test(dashboard)
++   && /label="Requirement coverage"/.test(dashboard),
++   'Dashboard labels the ring Target/Requirement coverage, not a bare "match"')
++ok(/analysis\.all_requirements_met/.test(dashboard)
++   && /All requirements currently met/.test(dashboard),
++   'Dashboard completion copy is gated on all_requirements_met')
++ok(/metric_definitions\?\.target_requirement_coverage/.test(dashboard),
++   'Dashboard explainer comes from the backend metric definition')
++
++// ---- 5. ScoreRing default label is not a generic "match"
++ok(/label = 'Requirement coverage'/.test(widgets),
++   'ScoreRing default label is Requirement coverage, never a bare "Match"')
++
++// ---- 6. stale styling exists
++ok(/\.pp-stale-note \{/.test(css) && /\.pp-stale-inline \{/.test(css),
++   'index.css defines stale-path styling')
++
++if (problems.length) {
++  console.error('Data truth (Phase 2) contract violations:')
++  for (const problem of problems) console.error(`  - ${problem}`)
++  process.exit(1)
++}
++console.log('Data truth (Phase 2) contracts OK')
+diff --git a/frontend/src/components/widgets.tsx b/frontend/src/components/widgets.tsx
+index 8bb628f..70919f0 100644
+--- a/frontend/src/components/widgets.tsx
++++ b/frontend/src/components/widgets.tsx
+@@ -21,13 +21,17 @@ export function SkillTag({ name, level, verified }: { name: string; level: strin
+   )
+ }
+ 
+-export function ScoreRing({ value }: { value: number }) {
++export function ScoreRing({ value, label = 'Requirement coverage', explainer }: {
++  value: number
++  label?: string
++  explainer?: string
++}) {
+   const r = 62
+   const c = 2 * Math.PI * r
+   const pct = Math.max(0, Math.min(100, value))
+   const offset = c - (pct / 100) * c
+   return (
+-    <div className="score-ring-view">
++    <div className="score-ring-view" title={explainer || undefined}>
+       <div className="score-ring">
+         <svg width="150" height="150">
+           <circle cx="75" cy="75" r={r} fill="none" stroke="var(--slate-100)" strokeWidth="12" />
+@@ -39,7 +43,7 @@ export function ScoreRing({ value }: { value: number }) {
+         </svg>
+         <div className="ring-label">
+           <strong>{Math.round(value)}%</strong>
+-          <small>Match</small>
++          <small>{label}</small>
+         </div>
+       </div>
+     </div>
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+index 551779e..b5d7b97 100644
+--- a/frontend/src/index.css
++++ b/frontend/src/index.css
+@@ -2718,6 +2718,15 @@ textarea.free-text:focus { outline: 2px solid var(--sb-indigo); outline-offset:
+ .pp-progress-summary > div:first-child span { font-weight: 800; color: var(--sb-indigo); }
+ .pp-progress-summary .lp-track { margin: 10px 0 8px; }
+ .pp-progress-summary p { margin: 0; }
++.pp-stale-note {
++  display: flex; align-items: flex-start; gap: 8px; margin-top: 12px;
++  padding: 10px 12px; border: 1px solid var(--amber-300, #fcd34d);
++  background: var(--amber-50, #fffbeb); color: var(--sb-midnight);
++  border-radius: var(--radius-sm); font-size: 13px; line-height: 1.45;
++}
++.pp-stale-note svg { flex: 0 0 auto; margin-top: 2px; color: var(--amber-600, #d97706); }
++.pp-stale-inline { display: flex; align-items: center; gap: 6px; color: var(--amber-700, #b45309); }
++.pp-stale-inline svg { flex: 0 0 auto; }
+ .pp-timeline { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+ .pp-item, .pp-stage {
+   display: flex; align-items: flex-start; gap: 12px;
+diff --git a/frontend/src/lib/types.ts b/frontend/src/lib/types.ts
+index 17927d5..cf61fc7 100644
+--- a/frontend/src/lib/types.ts
++++ b/frontend/src/lib/types.ts
+@@ -241,6 +241,27 @@ export interface ActivitySummary {
+   leaderboard: { status: string; message?: string }
+ }
+ 
++// Canonical score registry. One key = one metric = one name/formula/value across
++// every page. `target_requirement_coverage` is the level-aware, partial-credit
++// metric (the Dashboard ring). `career_readiness` is the stricter all-or-nothing
++// share. `verified_evidence_coverage` counts only passed Final Assessments.
++// `catalogue_similarity` is name-overlap only and is never a competence claim.
++export type CanonicalMetricKey =
++  | 'target_requirement_coverage'
++  | 'career_readiness'
++  | 'verified_evidence_coverage'
++  | 'catalogue_similarity'
++
++export interface MetricDefinition {
++  key: CanonicalMetricKey
++  label: string
++  short_label: string
++  formula: string
++  evidence: string
++  rounding: string
++  complete_when: string
++}
++
+ export interface Analysis {
+   student_id: number
+   role_id: number
+@@ -249,6 +270,10 @@ export interface Analysis {
+   match_score: number
+   skill_gaps: SkillGap[]
+   gap_count: number
++  metrics?: Partial<Record<CanonicalMetricKey, number>>
++  metric_definitions?: Partial<Record<CanonicalMetricKey, MetricDefinition>>
++  all_requirements_met?: boolean
++  missing_requirements?: string[]
+ }
+ 
+ export interface LearningResource {
+@@ -961,6 +986,11 @@ export interface PersonalizedPath {
+   student_id: number
+   skill_id: number
+   diagnostic_id: number
++  // A path belongs to one diagnostic. When a newer completed diagnostic exists
++  // the path is "stale": its gaps must not override the newer diagnostic, and
++  // the UI must label it rather than silently showing old advice as current.
++  latest_diagnostic_id?: number | null
++  stale?: boolean
+   required_level: string
+   items: PersonalizedPathItem[]
+   stages: PersonalizedStage[]
+@@ -983,6 +1013,8 @@ export interface FinalAssessmentStatus {
+   required_level: string
+   diagnostic_completed: boolean
+   path_exists: boolean
++  path_stale?: boolean
++  latest_diagnostic_id?: number | null
+   has_blueprint: boolean
+   readiness: FinalAssessmentReadiness
+ }
+diff --git a/frontend/src/pages/DashboardPage.tsx b/frontend/src/pages/DashboardPage.tsx
+index 936b5d4..8b4e216 100644
+--- a/frontend/src/pages/DashboardPage.tsx
++++ b/frontend/src/pages/DashboardPage.tsx
+@@ -585,7 +585,7 @@ function StudentDashboard({ student, analysis, onNavigate }: { student?: Student
+     <div>
+       <section className="dashboard-hero">
+         <div className="dashboard-hero-copy">
+-          <p className="eyebrow">Career Readiness</p>
++          <p className="eyebrow">Target requirement coverage</p>
+           <h1>{analysis.role_title}</h1>
+           <p>
+             SkillBridge compares your current evidence against the role requirements, then turns
+@@ -600,7 +600,13 @@ function StudentDashboard({ student, analysis, onNavigate }: { student?: Student
+             </button>
+           </div>
+         </div>
+-        <ScoreRing value={analysis.match_score} />
++        <ScoreRing
++          value={analysis.metrics?.target_requirement_coverage ?? analysis.match_score}
++          label="Requirement coverage"
++          explainer={analysis.metric_definitions?.target_requirement_coverage
++            ? `${analysis.metric_definitions.target_requirement_coverage.formula}. Evidence: ${analysis.metric_definitions.target_requirement_coverage.evidence}`
++            : 'Level-aware coverage of this role’s required skills. Partial credit for progress below a required level; a gap keeps this below 100%.'}
++        />
+       </section>
+       {student && (
+         <MatchBreakdown kind="target-role" pct={analysis.match_score}
+@@ -639,7 +645,9 @@ function StudentDashboard({ student, analysis, onNavigate }: { student?: Student
+         <div className="insight-card">
+           <span className="label">Recommended Next Step</span>
+           <strong className="next-step-label">{ns.label}</strong>
+-          <small>{gapCount === 0 ? 'Career ready' : `${gapCount} skill gap${gapCount === 1 ? '' : 's'} to close`}</small>
++          <small>{gapCount === 0 && analysis.all_requirements_met !== false
++            ? 'All requirements currently met'
++            : `${gapCount} skill gap${gapCount === 1 ? '' : 's'} to close`}</small>
+           <NextStepAction step={ns} go={go} roleTitle={analysis.role_title} />
+           {ns.action === null && gapCount === 0 && (
+             <button type="button" className="btn btn-sm dash-next-go" onClick={() => onFocus('find')}>
+diff --git a/frontend/src/pages/LearningPage.tsx b/frontend/src/pages/LearningPage.tsx
+index 157471a..73bfe8a 100644
+--- a/frontend/src/pages/LearningPage.tsx
++++ b/frontend/src/pages/LearningPage.tsx
+@@ -21,7 +21,7 @@ import {
+   topicProgressFor,
+   type LearningTab,
+ } from '../components/learning'
+-import { IconArrowRight, IconAssessment, IconBack, IconBolt, IconBook, IconChat, IconCheck, IconChevron, IconClock, IconExternal, IconLock, IconRoadmap, IconShield, IconTarget } from '../components/Icons'
++import { IconAlert, IconArrowRight, IconAssessment, IconBack, IconBolt, IconBook, IconChat, IconCheck, IconChevron, IconClock, IconExternal, IconLock, IconRoadmap, IconShield, IconTarget } from '../components/Icons'
+ 
+ function SafeMarkdown({ children }: { children: React.ReactNode }) {
+   return <Markdown>{String(children ?? '')}</Markdown>
+@@ -290,7 +290,12 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
+     pct: openGaps.length ? Math.round((verifiedRequiredSet.size / openGaps.length) * 100) : 0,
+   }
+ 
+-  const matchPct = allGaps.length ? Math.round((allGaps.filter((g) => g.status === 'strong').length / allGaps.length) * 100) : null
++  // Data truth (Phase 2): read the backend's canonical target requirement
++  // coverage. Never recompute a "match" from strong/total here — that ignored
++  // partial credit and could disagree with the Dashboard ring for the same role.
++  const matchPct = analysis?.metrics?.target_requirement_coverage != null
++    ? Math.round(analysis.metrics.target_requirement_coverage)
++    : (analysis?.match_score != null ? Math.round(analysis.match_score) : null)
+   const requiredSkillCount = allGaps.length
+   const plannedMinutes = knownPaths.reduce((sum, path) => sum + sumPathMinutes(path), 0)
+ 
+@@ -413,7 +418,7 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
+           <div className="hero-target-role">{targetTitle || 'No target selected'}</div>
+           {matchPct !== null && (
+             <>
+-              <p className="hero-progress-label">Current skill match <strong>{matchPct}%</strong></p>
++              <p className="hero-progress-label" title="Level-aware coverage of your target role's required skills (backend-computed).">Current requirement coverage <strong>{matchPct}%</strong></p>
+               <div className="progress-track"><div className="progress-fill" style={{ width: `${matchPct}%` }} /></div>
+             </>
+           )}
+@@ -1707,6 +1712,17 @@ function PersonalizedPathPanel({ studentId, skillId, skillName, refreshKey = 0,
+         )}
+       </div>
+ 
++      {path && path.stale && (
++        <div className="pp-stale-note" role="note">
++          <IconAlert size={15} />
++          <span>
++            This path was built from an <strong>earlier diagnostic</strong>. A newer completed
++            diagnostic exists, so these topics may no longer reflect your current results and
++            do not count toward Final Assessment readiness. Create a fresh path to realign it.
++          </span>
++        </div>
++      )}
++
+       {error && <div className="error learning-error">{error}</div>}
+ 
+       {!path && diagnosticDone && (
+@@ -1839,6 +1855,13 @@ function PersonalizedPathPanel({ studentId, skillId, skillName, refreshKey = 0,
+                 available from the Assessments page; every required competency below must score 70%
+                 or higher for the attempt to pass.
+               </p>
++              {finalStatus.path_stale && (
++                <p className="muted small pp-stale-inline" role="note">
++                  <IconAlert size={13} /> Your learning path is stale (built from an earlier
++                  diagnostic), so its completed topics are not counted here. Only your latest
++                  completed diagnostic counts toward coverage.
++                </p>
++              )}
+               <div className="plan-coverage">
+                 {finalStatus.readiness.required.map((slug) => {
+                   const covered = finalStatus.readiness.satisfied.includes(slug)
+diff --git a/frontend/src/pages/SkillsRolesPage.tsx b/frontend/src/pages/SkillsRolesPage.tsx
+index 57ce65e..1b9f682 100644
+--- a/frontend/src/pages/SkillsRolesPage.tsx
++++ b/frontend/src/pages/SkillsRolesPage.tsx
+@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+ import { useApp } from '../AppContext'
+ import { api } from '../lib/api'
+ import { RELOCATION_MARKETS, marketLabel } from '../lib/markets'
+-import type { RoleRecord, Student, Skill, RolesResponse, EscoOccupation, Analysis, RoleRecommendation, RoleRecommendationsResponse, SavedRolesResponse, ScenarioLibrary, RoleMappingMatch, RoleMappingTarget, RoleMappingEvent, RecentRole, RoleProvenance, RecentJob, RecentJobsResponse } from '../lib/types'
++import type { RoleRecord, Student, Skill, RolesResponse, EscoOccupation, Analysis, RoleRecommendation, RoleRecommendationsResponse, SavedRolesResponse, ScenarioLibrary, RoleMappingMatch, RoleMappingTarget, RoleMappingEvent, RecentRole, RoleProvenance, RecentJob, RecentJobsResponse, CanonicalMetricKey } from '../lib/types'
+ import { IconPlus, IconEdit, IconTrash, IconUpload, IconSearch, IconCheck, IconAlert, IconTarget, IconBookmark, IconCompare, IconBack, IconShield, IconBolt, IconArrowRight } from '../components/Icons'
+ import { SkillTag, GapPill } from '../components/widgets'
+ import { IconRoles } from '../components/Icons'
+@@ -238,6 +238,10 @@ function serializeExplorer(tab: ExplorerTab, q: string, fam: string[]): string {
+ 
+ type ExplorerFilters = { location: string[]; level: string[]; category: string[]; skill: string[]; family: string[] }
+ 
++// Canonical `catalogue_similarity` (name-only overlap) for catalogue roles that
++// the recommendation engine did not score. This is EXPLICITLY not a competence
++// or verification claim: it ignores levels and never counts as a requirement
++// being met. Every surface that shows it must label it "Catalogue similarity".
+ function matchPctOf(r: RoleRecord, cvSkillNames: string[]): number {
+   if (r.required_skills.length === 0) return 0
+   const present = r.required_skills.reduce((n, s) => n + (cvSkillNames.includes(s.name.toLowerCase().trim()) ? 1 : 0), 0)
+@@ -251,7 +255,13 @@ function matchPctOf(r: RoleRecord, cvSkillNames: string[]): number {
+ // reason text) whenever the role appears there; otherwise falls back to the
+ // same required-skill overlap math the backend uses. Every surface (cards,
+ // drawer and compare) reads this helper so a role always shows one match.
+-export interface RoleMatchInfo { pct: number | null; reason?: string; confidence?: string }
++export interface RoleMatchInfo {
++  pct: number | null
++  reason?: string
++  confidence?: string
++  metric?: CanonicalMetricKey
++  metricLabel?: string
++}
+ 
+ function backendRecMap(recs: RoleRecommendationsResponse | null): Map<number, RoleRecommendation> {
+   const m = new Map<number, RoleRecommendation>()
+@@ -263,9 +273,15 @@ function backendRecMap(recs: RoleRecommendationsResponse | null): Map<number, Ro
+ function displayMatchOf(role: RoleRecord, cvSkillNames: string[], recByRole: Map<number, RoleRecommendation>): RoleMatchInfo {
+   const rec = recByRole.get(role.id)
+   if (rec && rec.match_score != null) {
+-    return { pct: Math.round(rec.match_score), reason: rec.reason, confidence: rec.confidence }
++    return {
++      pct: Math.round(rec.match_score), reason: rec.reason, confidence: rec.confidence,
++      metric: 'target_requirement_coverage', metricLabel: 'Requirement coverage',
++    }
++  }
++  return {
++    pct: cvSkillNames.length > 0 ? matchPctOf(role, cvSkillNames) : null,
++    metric: 'catalogue_similarity', metricLabel: 'Catalogue similarity',
+   }
+-  return { pct: cvSkillNames.length > 0 ? matchPctOf(role, cvSkillNames) : null }
+ }
+ 
+ function roleSourceLabel(r: RoleRecord): string {
+@@ -455,7 +471,8 @@ function MatchRing({ pct, size = 88, label }: { pct: number | null; size?: numbe
+       className="srb-match-ring"
+       style={{ '--pct': safe, width: size, height: size } as React.CSSProperties}
+       role="img"
+-      aria-label={pct == null ? 'Match not computed yet' : `${safe}% skill match`}
++      title={label ? `${label}: ${pct == null ? 'not computed yet' : `${safe}%`}` : undefined}
++      aria-label={pct == null ? 'Match not computed yet' : `${safe}% ${label || 'requirement coverage'}`}
+     >
+       <div className="srb-match-inner">
+         {pct == null ? <span className="srb-match-none">—</span> : <strong>{safe}%</strong>}
+@@ -465,9 +482,10 @@ function MatchRing({ pct, size = 88, label }: { pct: number | null; size?: numbe
+   )
+ }
+ 
+-function RoleLibraryCard({ r, pct, selected, dest, chips, statusCounts, noCvSkills, saved, cmp, onCompare, onSelect, onDetails, onToggleSave }: {
++function RoleLibraryCard({ r, pct, metricLabel, selected, dest, chips, statusCounts, noCvSkills, saved, cmp, onCompare, onSelect, onDetails, onToggleSave }: {
+   r: RoleRecord
+   pct: number
++  metricLabel?: string
+   selected: boolean
+   dest?: string
+   chips?: SkillChip[]
+@@ -494,7 +512,7 @@ function RoleLibraryCard({ r, pct, selected, dest, chips, statusCounts, noCvSkil
+             {` · ${roleExperience(r)}`}
+           </p>
+         </div>
+-        <MatchRing pct={noCvSkills ? null : pct} size={72} />
++        <MatchRing pct={noCvSkills ? null : pct} size={72} label={metricLabel} />
+       </header>
+       {r.description && <p className="srb-role-desc">{r.description.length > 140 ? `${r.description.slice(0, 137)}…` : r.description}</p>}
+       {noCvSkills ? (
+@@ -580,12 +598,12 @@ function RoleDetailsModal({ role, noCvSkills, profileByName, cvSkillNames, selec
+         </header>
+         {role.description && <p className="srb-modal-desc">{role.description}</p>}
+         <div className="srb-modal-match">
+-          <MatchRing pct={noCvSkills ? null : pct} size={92} />
++          <MatchRing pct={noCvSkills ? null : pct} size={92} label="Catalogue similarity" />
+           <div>
+-            <p className="srb-eyebrow">Skill match</p>
++            <p className="srb-eyebrow">Catalogue similarity</p>
+             {noCvSkills
+               ? <p className="small muted">Upload a CV to measure your match against this role.</p>
+-              : <p className="small muted">{(rows.length - learningGaps.length)} of {rows.length} required skills are on your profile. Verified skills outrank self-reported ones.</p>}
++              : <p className="small muted">{(rows.length - learningGaps.length)} of {rows.length} required skill names are on your profile. This is name overlap only — it ignores levels and is not a verification claim. Verified skills outrank self-reported ones.</p>}
+           </div>
+         </div>
+         <div className="srb-modal-section">
+@@ -767,9 +785,9 @@ function RoleDetailsDrawer({ role, others, match, noCvSkills, profileByName, evi
+         )}
+         {role.description && <p className="rd-drawer-desc">{role.description}</p>}
+         <div className="srb-modal-match">
+-          <MatchRing pct={noCvSkills ? null : (match.pct ?? null)} size={92} />
++          <MatchRing pct={noCvSkills ? null : (match.pct ?? null)} size={92} label={match.metricLabel || 'Requirement coverage'} />
+           <div>
+-            <p className="srb-eyebrow">Skill match</p>
++            <p className="srb-eyebrow">{match.metricLabel || 'Requirement coverage'}</p>
+             {noCvSkills
+               ? <p className="small muted">Upload a CV to measure your match against this role.</p>
+               : <>
+@@ -1380,9 +1398,15 @@ function StudentBrowse({ student, analysis, onNavigate, backTo }: { student?: St
+   // reference roles are demoted to their own labelled secondary section.
+   const realRecs = (recs?.recommendations || []).filter((r) => r.source !== 'catalog')
+ 
+-  const targetPct = cvSkillNames.length > 0 && (currentTarget?.required_skills.length ?? 0) > 0
+-    ? Math.round((currentTarget!.required_skills.reduce((n, s) => n + (cvSkillNames.includes(s.name.toLowerCase().trim()) ? 1 : 0), 0) / currentTarget!.required_skills.length) * 100)
+-    : null
++  // Data truth (Phase 2): the target-role number comes from the backend's
++  // canonical `target_requirement_coverage` metric. It is never recomputed here
++  // from raw skill-name overlap, which ignored levels and could show 100% while
++  // a requirement gap (e.g. Docker) was still open.
++  const targetCoverage = analysis?.metrics?.target_requirement_coverage ?? analysis?.match_score ?? null
++  const targetPct = targetCoverage === null ? null : Math.round(targetCoverage)
++  const targetComplete = analysis?.all_requirements_met === true
++  const targetOpenGaps = analysis?.missing_requirements?.length
++    ?? (analysis?.skill_gaps || []).filter((g) => g.status !== 'strong').length
+ 
+   // Phase 2: a single match source (backend recomputation whenever available)
+   // and display-level deduplication across sources — records are never deleted.
+@@ -1726,7 +1750,7 @@ function StudentBrowse({ student, analysis, onNavigate, backTo }: { student?: St
+         <div className="srb-card srb-target-card">
+           <div className="srb-card-head">
+             <span className="srb-eyebrow">Your target career</span>
+-            <MatchRing pct={targetPct} size={96} label="match" />
++            <MatchRing pct={targetPct} size={96} label="requirement coverage" />
+           </div>
+           <h3 className="srb-target-title">{currentTarget?.title || 'Not selected yet'}</h3>
+           <p className="srb-target-meta">
+@@ -1843,7 +1867,7 @@ function StudentBrowse({ student, analysis, onNavigate, backTo }: { student?: St
+                 <article className="srb-ref-card" key={r.id}>
+                   <div className="srb-ref-top">
+                     <span className="chip chip-catalog">Catalog</span>
+-                    <MatchRing pct={matchPctOf(r, cvSkillNames)} size={70} />
++                    <MatchRing pct={matchPctOf(r, cvSkillNames)} size={70} label="catalogue similarity" />
+                   </div>
+                   <h4 className="srb-ref-title">{r.title}</h4>
+                   <p className="srb-ref-gap">
+@@ -2011,6 +2035,7 @@ function StudentBrowse({ student, analysis, onNavigate, backTo }: { student?: St
+                     <RoleLibraryCard
+                       r={r}
+                       pct={displayMatch(r).pct ?? 0}
++                      metricLabel={displayMatch(r).metricLabel}
+                       selected={selectedRole === r.id}
+                       dest={catalog.some((c) => c.id === r.id) ? 'catalog' : undefined}
+                       chips={noCvSkills ? undefined : statusBySkill.map(({ s, status }) => ({ name: s.name, level: s.required_level, matched: status !== 'missing' }))}
+@@ -2068,6 +2093,7 @@ function StudentBrowse({ student, analysis, onNavigate, backTo }: { student?: St
+                     key={r.id}
+                     r={r}
+                     pct={displayMatch(r).pct ?? 0}
++                    metricLabel={displayMatch(r).metricLabel}
+                     selected={selectedRole === r.id}
+                     dest={catalog.some((c) => c.id === r.id) ? 'catalog' : undefined}
+                     chips={noCvSkills ? undefined : statusBySkill.map(({ s, status }) => ({ name: s.name, level: s.required_level, matched: status !== 'missing' }))}
+@@ -2271,9 +2297,17 @@ function StudentBrowse({ student, analysis, onNavigate, backTo }: { student?: St
+         <div className="sro3-gap-head">
+           <div className="sro3-gap-icon"><IconTarget size={16} /></div>
+           <div>
+-            <p className="sro3-eyebrow">Career readiness</p>
++            <p className="sro3-eyebrow">Target requirement coverage</p>
+             <h3>Your {currentTarget?.title || 'target'} skill gap</h3>
+-            {targetPct !== null && <p className="sro3-gap-sub">You already match {targetPct}% of this role's requirements.</p>}
++            {targetPct !== null && (
++              <p className="sro3-gap-sub">
++                Your evidence currently covers <strong>{targetPct}%</strong> of this role&apos;s
++                {' '}requirements
++                {targetComplete
++                  ? ' — all requirements are currently met (level-aware; verify to make it official).'
++                  : `, with ${targetOpenGaps} requirement${targetOpenGaps === 1 ? '' : 's'} still open.`}
++              </p>
++            )}
+             {targetPct === null && <p className="sro3-gap-sub">{noCvSkills ? 'Upload a CV so matching can begin.' : 'Pick a target career to see your gap map.'}</p>}
+           </div>
+         </div>

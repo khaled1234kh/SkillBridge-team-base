@@ -1,0 +1,496 @@
+diff --git a/backend/tests/test_agentic_learning_phase3.py b/backend/tests/test_agentic_learning_phase3.py
+new file mode 100644
+index 0000000..ca21f1d
+--- /dev/null
++++ b/backend/tests/test_agentic_learning_phase3.py
+@@ -0,0 +1,78 @@
++"""Phase 3: agentic-learning UI contract.
++
++The frontend renders the orchestrator's decision (action, reason, objective,
++evidence) and the non-executing static check. These tests pin the persisted
++payload shape the UI depends on, and re-assert the honesty boundary: a static
++check never executes code, never changes the practice score, and never verifies
++a skill.
++"""
++from urllib.parse import quote
++
++from app import genai, learning_orchestrator as agent, models
++
++UI_DECISION_KEYS = {"action_type", "topic_id", "evidence", "decision_reason", "next_step", "objective"}
++
++
++def _python_flow(client, student_id, headers):
++    skill = models.get_skill_by_name("Python")
++    diagnostic = client.post(
++        f"/api/students/{student_id}/learning/{skill['id']}/diagnostic/generate", json={}, headers=headers).json()
++    client.post(
++        f"/api/students/{student_id}/learning/{skill['id']}/diagnostic/submit",
++        json={"diagnostic_id": diagnostic["diagnostic_id"], "answers": ["not sure"] * len(diagnostic["questions"])},
++        headers=headers)
++    path = client.post(
++        f"/api/students/{student_id}/learning/{skill['id']}/personalized-path/generate", json={}, headers=headers).json()
++    item = next(row for row in path["items"] if row["competency"] == "python_functions")
++    lesson_url = f"/api/students/{student_id}/learning/{skill['id']}/lessons/{quote(item['competency'], safe='')}"
++    client.post(lesson_url + "/generate", json={}, headers=headers)
++    return skill, item, lesson_url
++
++
++def test_orchestrator_decision_exposes_every_ui_field(client, student_id, auth_headers, monkeypatch):
++    monkeypatch.setattr(genai, "genai_enabled", lambda: False)
++    headers = auth_headers("aisha@student.edu")
++    skill, _, _ = _python_flow(client, student_id, headers)
++    decision = client.get(
++        f"/api/students/{student_id}/learning/{skill['id']}/orchestrator/next", headers=headers).json()
++    assert UI_DECISION_KEYS <= set(decision)
++    assert decision["action_type"] in agent.ALLOWED_ACTIONS
++    assert isinstance(decision["evidence"], list) and decision["evidence"]
++    assert all({"kind", "detail"} <= set(e) for e in decision["evidence"])
++    assert decision["decision_reason"] and decision["next_step"]
++
++
++def test_static_check_disclosure_shape_and_no_runtime_claim(client, student_id, auth_headers, monkeypatch):
++    monkeypatch.setattr(genai, "genai_enabled", lambda: False)
++    headers = auth_headers("aisha@student.edu")
++    skill, _, lesson_url = _python_flow(client, student_id, headers)
++
++    bad = client.post(lesson_url + "/practice",
++                      json={"answer": "def celsius_to_fahrenheit(celsius):\n    print(celsius)"},
++                      headers=headers).json()["attempt"]
++    bad_check = bad["practice_task"]["static_check"]
++    assert bad_check["status"] == "needs_fix"
++    assert "not executed" in bad_check["note"].lower()
++    assert isinstance(bad_check["checks"], list) and bad_check["checks"]
++
++    good = client.post(lesson_url + "/practice", json={"answer": """def celsius_to_fahrenheit(celsius):
++    return (celsius * 9 / 5) + 32
++
++I return the value so callers can reuse it."""}, headers=headers).json()["attempt"]
++    good_check = good["practice_task"]["static_check"]
++    assert good_check["status"] == "looks_structurally_sound"
++    # The structural check is evidence, not a grade: it must not silently turn a
++    # needs-review attempt into a pass or verify the skill.
++    assert good["status"] in ("needs_review", "ready")
++    assert "not executed" in good_check["note"].lower()
++
++
++def test_reassessment_decision_still_renders_full_contract(client, student_id, auth_headers):
++    headers = auth_headers("aisha@student.edu")
++    skill = models.get_skill_by_name("Python")
++    decision = client.get(
++        f"/api/students/{student_id}/learning/{skill['id']}/orchestrator/next", headers=headers).json()
++    assert UI_DECISION_KEYS <= set(decision)
++    assert decision["action_type"] == agent.REQUEST_REASSESSMENT
++    assert decision["topic_id"] is None
++    assert decision["evidence"]
+diff --git a/backend/tests/test_runtime_learning_phase3_agentic_frontend.py b/backend/tests/test_runtime_learning_phase3_agentic_frontend.py
+new file mode 100644
+index 0000000..74a26cd
+--- /dev/null
++++ b/backend/tests/test_runtime_learning_phase3_agentic_frontend.py
+@@ -0,0 +1,27 @@
++"""Learning Phase 3 agentic frontend source-contract guard.
++
++Pins the learning-agent UI to the real orchestrator API: the decision and its
++evidence are rendered, practice/Mini Check go through the real lesson APIs, a
++non-executing static check is labelled honestly, the English/Egyptian-Arabic
++learning language choice persists, errors offer a retry, and the full roadmap
++stays reachable.
++"""
++
++import shutil
++import subprocess
++
++import pytest
++
++from contract_paths import WORKSPACE_ROOT, checker_script, node_env
++
++
++def test_runtime_learning_phase3_agentic_frontend_contracts_hold():
++    node = shutil.which("node")
++    if not node:
++        pytest.skip("node is required to run SkillBridge but was not found")
++    script = checker_script("check-learning-phase3-agentic.mjs")
++    assert script.exists()
++    result = subprocess.run([node, str(script)], cwd=WORKSPACE_ROOT, capture_output=True,
++                            text=True, timeout=120, env=node_env())
++    assert result.returncode == 0, (
++        f"Learning Phase 3 agentic frontend contracts broken:\n{result.stdout}\n{result.stderr}")
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+index b5d7b97..e636f47 100644
+--- a/frontend/src/index.css
++++ b/frontend/src/index.css
+@@ -2727,6 +2727,53 @@ textarea.free-text:focus { outline: 2px solid var(--sb-indigo); outline-offset:
+ .pp-stale-note svg { flex: 0 0 auto; margin-top: 2px; color: var(--amber-600, #d97706); }
+ .pp-stale-inline { display: flex; align-items: center; gap: 6px; color: var(--amber-700, #b45309); }
+ .pp-stale-inline svg { flex: 0 0 auto; }
++.agent-panel {
++  margin-top: 16px; padding: 16px; border: 1px solid var(--sb-indigo);
++  border-radius: var(--radius-md, 12px); background: var(--sb-indigo-soft, #eef2ff);
++}
++.agent-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
++.agent-head .panel-title { margin: 2px 0 0; }
++.agent-lang { display: inline-flex; border: 1px solid var(--slate-300); border-radius: 999px; overflow: hidden; background: var(--white); }
++.agent-lang-btn {
++  padding: 5px 12px; font-size: 12px; font-weight: 700; color: var(--slate-500);
++  background: transparent; border: 0; cursor: pointer;
++}
++.agent-lang-btn.active { background: var(--sb-indigo); color: var(--white); }
++.agent-status { margin: 12px 0 0; }
++.agent-error {
++  display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
++  margin-top: 12px; padding: 10px 12px; border: 1px solid var(--red);
++  background: var(--red-soft); color: var(--red); border-radius: var(--radius-sm); font-size: 13px;
++}
++.agent-decision { margin-top: 12px; }
++.agent-action-chip { cursor: default; font-weight: 800; letter-spacing: 0.04em; }
++.agent-next-step { margin: 8px 0 4px; font-size: 14.5px; font-weight: 600; color: var(--sb-midnight); }
++.agent-why { margin-top: 10px; font-weight: 700; }
++.agent-evidence {
++  margin: 8px 0 0; padding: 10px 12px 10px 28px; background: var(--white);
++  border: 1px solid var(--slate-200); border-radius: var(--radius-sm);
++  font-size: 13px; line-height: 1.5; color: var(--slate-600);
++}
++.agent-evidence li { margin: 2px 0; }
++.agent-static-check {
++  margin-top: 12px; padding: 10px 12px; border-radius: var(--radius-sm);
++  border: 1px solid var(--slate-300); background: var(--white); font-size: 13px; line-height: 1.5;
++}
++.agent-static-check.sound { border-color: var(--green); }
++.agent-static-check.fix { border-color: var(--amber-400, #fbbf24); }
++.agent-static-label { display: inline-block; font-weight: 800; color: var(--sb-midnight); margin-bottom: 4px; }
++.agent-static-disclosure { margin: 4px 0; color: var(--slate-600); }
++.agent-static-status { margin: 4px 0; font-weight: 600; }
++.agent-static-list { margin: 6px 0 0; padding-left: 20px; color: var(--slate-600); }
++.agent-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
++.agent-reassess { flex: 1 1 220px; margin: 0; }
++.agent-submit-note { margin: 10px 0 0; }
++.agent-unverified {
++  display: flex; align-items: center; gap: 6px; margin: 12px 0 0;
++  padding-top: 10px; border-top: 1px dashed var(--slate-300);
++  color: var(--slate-500); font-size: 12px;
++}
++.agent-unverified svg { flex: 0 0 auto; }
+ .pp-timeline { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+ .pp-item, .pp-stage {
+   display: flex; align-items: flex-start; gap: 12px;
+diff --git a/frontend/src/lib/types.ts b/frontend/src/lib/types.ts
+index cf61fc7..28c18c2 100644
+--- a/frontend/src/lib/types.ts
++++ b/frontend/src/lib/types.ts
+@@ -1097,11 +1097,24 @@ export interface PracticeTaskQuestion {
+   difficulty?: string
+ }
+ 
++/**
++ * Non-executing structural review of a submitted practice answer. It never runs
++ * the code, never changes the practice score and never verifies a skill — it only
++ * reports whether the expected structure is present so the learning agent may
++ * offer a Mini Check.
++ */
++export interface PracticeStaticCheck {
++  status: 'looks_structurally_sound' | 'needs_fix'
++  note: string
++  checks: string[]
++}
++
+ export interface PracticeTask {
+   source: PracticeTaskSource
+   source_attempt_id: number | null
+   type: string
+   questions: PracticeTaskQuestion[]
++  static_check?: PracticeStaticCheck | null
+ }
+ 
+ export interface RemediationReview {
+diff --git a/frontend/src/pages/LearningPage.tsx b/frontend/src/pages/LearningPage.tsx
+index 73bfe8a..46b658c 100644
+--- a/frontend/src/pages/LearningPage.tsx
++++ b/frontend/src/pages/LearningPage.tsx
+@@ -4,7 +4,7 @@ import { useApp } from '../AppContext'
+ import { api } from '../lib/api'
+ import { humanizeTopicLabel } from '../lib/topicLabels'
+ import type { ActivitySummary, Analysis, CareerRoadmap, DiagnosticQuestion, DiagnosticResult, 
+-GeneratedDiagnostic, FinalAssessmentStatus, LearningItem, LearningResource, Lesson, LessonPractice, PersonalizedPath, PersonalizedPathItem, PersonalizedPathResponse, PracticeAttempt, ScenarioLibrary, ScenarioCard, SkillGap, 
++GeneratedDiagnostic, FinalAssessmentStatus, LearningAgentActionType, LearningAgentDecision, LearningItem, LearningResource, Lesson, LessonPractice, PersonalizedPath, PersonalizedPathItem, PersonalizedPathResponse, PracticeAttempt, ScenarioLibrary, ScenarioCard, SkillGap, 
+ TopicResult } from '../lib/types'
+ import {
+   CareerProgress,
+@@ -65,6 +65,235 @@ function categoryToneFor(category: string) {
+   return 'slate'
+ }
+ 
++// ------------------------------------------------------------------ agentic learning
++//
++// Phase 3: the learning agent recommends; it never grades, completes a topic or
++// verifies a skill. The language control is persistent (localStorage) so a
++// student who chose Egyptian Arabic keeps it across visits and pages.
++
++const LEARNING_LANGUAGE_KEY = 'sb_learning_language'
++type LearningLanguage = 'en' | 'ar'
++
++function useLearningLanguage(): [LearningLanguage, (next: LearningLanguage) => void] {
++  const [language, setLanguage] = useState<LearningLanguage>(() => {
++    try {
++      return localStorage.getItem(LEARNING_LANGUAGE_KEY) === 'ar' ? 'ar' : 'en'
++    } catch {
++      return 'en'
++    }
++  })
++  const update = useCallback((next: LearningLanguage) => {
++    setLanguage(next)
++    try { localStorage.setItem(LEARNING_LANGUAGE_KEY, next) } catch { /* storage may be unavailable */ }
++  }, [])
++  return [language, update]
++}
++
++type LessonTab = 'learn' | 'example' | 'practice' | 'discuss' | 'mini_check'
++
++const AGENT_ACTION_TABS: Record<LearningAgentActionType, LessonTab> = {
++  EXPLAIN: 'learn',
++  PRACTICE: 'practice',
++  GIVE_HINT: 'practice',
++  REVIEW_PREREQUISITE: 'learn',
++  MINI_CHECK: 'mini_check',
++  ADVANCE: 'learn',
++  REQUEST_REASSESSMENT: 'learn',
++}
++
++interface AgentCopy {
++  eyebrow: string
++  title: string
++  why: string
++  objective: string
++  evidence: string
++  open: string
++  staticLabel: string
++  noExec: string
++  staticSound: string
++  staticFix: string
++  retry: string
++  roadmap: string
++  reassess: string
++  submitNote: string
++  unverified: string
++  loading: string
++  english: string
++  egyptianArabic: string
++}
++
++const AGENT_COPY: Record<LearningLanguage, AgentCopy> = {
++  en: {
++    eyebrow: 'Learning agent',
++    title: 'Your next best step',
++    why: 'Why this step?',
++    objective: 'Objective',
++    evidence: 'Evidence',
++    open: 'Open this step',
++    staticLabel: 'Static code check / فحص ثابت للكود',
++    noExec: 'Python code is not executed here. This is a structural review only — it never changes your practice score and never verifies a skill.',
++    staticSound: 'The stored structural check looks sound, so a Mini Check can confirm understanding. It still does not run the code.',
++    staticFix: 'The stored structural check still finds missing structure. Revise the practice answer and try again.',
++    retry: 'Retry recommendation',
++    roadmap: 'View full roadmap',
++    reassess: 'Regenerate your path from the latest diagnostic, or retake the diagnostic to continue.',
++    submitNote: 'Practice answers and Mini Checks are submitted through the real lesson APIs; the agent only recommends.',
++    unverified: 'This recommendation never verifies a skill — only a passed Final Assessment can do that.',
++    loading: 'Choosing your next step…',
++    english: 'English',
++    egyptianArabic: 'العربية المصرية',
++  },
++  ar: {
++    eyebrow: 'وكيل التعلّم',
++    title: 'أفضل خطوة تالية',
++    why: 'لماذا هذه الخطوة؟',
++    objective: 'الهدف',
++    evidence: 'الأدلة',
++    open: 'افتح هذه الخطوة',
++    staticLabel: 'Static code check / فحص ثابت للكود',
++    noExec: 'لا يتم تنفيذ كود Python هنا. هذا فحص هيكلي فقط — لا يغيّر درجة التدريب ولا يوثّق المهارة.',
++    staticSound: 'الفحص الهيكلي المخزّن سليم، لذا يمكن إجراء الاختبار المصغّر للتأكد من الفهم. ولا يزال لا ينفّذ الكود.',
++    staticFix: 'لا يزال الفحص الهيكلي يجد بنية ناقصة. عدّل إجابة التدريب ثم حاول مرة أخرى.',
++    retry: 'أعد المحاولة',
++    roadmap: 'عرض خريطة الطريق كاملة',
++    reassess: 'أعد إنشاء مسارك من أحدث تشخيص، أو أعد التشخيص للمتابعة.',
++    submitNote: 'تُرسَل إجابات التدريب والاختبار المصغّر عبر واجهات الدرس الحقيقية؛ والوكيل يوصي فقط.',
++    unverified: 'هذه التوصية لا توثّق أي مهارة — فقط اجتياز التقييم النهائي يفعل ذلك.',
++    loading: 'جارٍ اختيار خطوتك التالية…',
++    english: 'English',
++    egyptianArabic: 'العربية المصرية',
++  },
++}
++
++function LearningAgentPanel({ studentId, skillId, onOpenTopic }: {
++  studentId: number
++  skillId: number
++  onOpenTopic: (competency: string, tab?: LessonTab) => void
++}) {
++  const [language, setLanguage] = useLearningLanguage()
++  const copy = AGENT_COPY[language]
++  const [agentDecision, setAgentDecision] = useState<LearningAgentDecision | null>(null)
++  const [latestAttempt, setLatestAttempt] = useState<PracticeAttempt | null>(null)
++  const [loading, setLoading] = useState(true)
++  const [error, setError] = useState('')
++  const [showEvidence, setShowEvidence] = useState(false)
++  const [retryKey, setRetryKey] = useState(0)
++
++  useEffect(() => {
++    let alive = true
++    setLoading(true)
++    setError('')
++    api.learningAgentNext(studentId, skillId)
++      .then((decision) => { if (alive) setAgentDecision(decision) })
++      .catch((e: unknown) => {
++        if (!alive) return
++        setAgentDecision(null)
++        setError((e as Error)?.message || 'Could not load the learning recommendation.')
++      })
++      .finally(() => { if (alive) setLoading(false) })
++    return () => { alive = false }
++  }, [studentId, skillId, retryKey])
++
++  const topic = agentDecision?.topic_id ?? null
++  useEffect(() => {
++    let alive = true
++    if (!topic) { setLatestAttempt(null); return () => { alive = false } }
++    api.lessonPracticeAttempts(studentId, skillId, topic)
++      .then((res) => { if (alive) setLatestAttempt(res.latest) })
++      .catch(() => { if (alive) setLatestAttempt(null) })
++    return () => { alive = false }
++  }, [studentId, skillId, topic, retryKey])
++
++  const staticCheck = latestAttempt?.practice_task?.static_check ?? null
++  const structurallySound = latestAttempt?.practice_task?.static_check?.status === 'looks_structurally_sound'
++
++  return (
++    <section className="agent-panel" aria-label="Learning agent recommendation">
++      <div className="agent-head">
++        <div className="panel-title-row">
++          <span className="panel-title-icon"><IconBolt size={15} /></span>
++          <div>
++            <span className="eyebrow">{copy.eyebrow}</span>
++            <h3 className="panel-title">{copy.title}</h3>
++          </div>
++        </div>
++        <div className="agent-lang" role="group" aria-label="Learning language">
++          <button type="button" className={`agent-lang-btn ${language === 'en' ? 'active' : ''}`}
++                  aria-pressed={language === 'en'} onClick={() => setLanguage('en')}>{copy.english}</button>
++          <button type="button" className={`agent-lang-btn ${language === 'ar' ? 'active' : ''}`}
++                  aria-pressed={language === 'ar'} onClick={() => setLanguage('ar')}>{copy.egyptianArabic}</button>
++        </div>
++      </div>
++
++      {loading && <p className="muted small agent-status" role="status">{copy.loading}</p>}
++
++      {error && (
++        <div className="agent-error" role="alert">
++          <span>{error}</span>
++          <button type="button" className="btn btn-sm" onClick={() => setRetryKey((k) => k + 1)}>{copy.retry}</button>
++        </div>
++      )}
++
++      {agentDecision && (
++        <>
++          <div className="agent-decision">
++            <span className="chip-btn agent-action-chip" data-action={agentDecision.action_type}>{agentDecision.action_type}</span>
++            <p className="agent-next-step">{agentDecision.next_step}</p>
++            {agentDecision.objective && (
++              <p className="muted small"><strong>{copy.objective}:</strong> {agentDecision.objective}</p>
++            )}
++          </div>
++
++          <button type="button" className="btn-link agent-why" aria-expanded={showEvidence}
++                  onClick={() => setShowEvidence((s) => !s)}>
++            {copy.why}
++          </button>
++          {showEvidence && (
++            <ul className="agent-evidence" aria-label={copy.evidence}>
++              {agentDecision.evidence.map((item, i) => (
++                <li key={i}><strong>{item.kind}</strong>: {item.detail}</li>
++              ))}
++            </ul>
++          )}
++
++          {staticCheck && (
++            <div className={`agent-static-check ${structurallySound ? 'sound' : 'fix'}`} role="note">
++              <span className="agent-static-label">{copy.staticLabel}</span>
++              <p className="agent-static-disclosure">{copy.noExec}</p>
++              <p className="agent-static-status">{structurallySound ? copy.staticSound : copy.staticFix}</p>
++              {Array.isArray(staticCheck.checks) && staticCheck.checks.length > 0 && (
++                <ul className="agent-static-list">
++                  {staticCheck.checks.map((check, i) => <li key={i}>{check}</li>)}
++                </ul>
++              )}
++            </div>
++          )}
++
++          <div className="agent-actions">
++            {agentDecision.action_type === 'REQUEST_REASSESSMENT' ? (
++              <p className="muted small agent-reassess">{copy.reassess}</p>
++            ) : topic ? (
++              <button type="button" className="btn btn-primary"
++                      onClick={() => onOpenTopic(topic, AGENT_ACTION_TABS[agentDecision.action_type])}>
++                {copy.open} <IconArrowRight size={14} />
++              </button>
++            ) : null}
++            <button type="button" className="btn btn-ghost"
++                    onClick={() => document.getElementById('career-roadmap')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>
++              {copy.roadmap}
++            </button>
++          </div>
++
++          <p className="muted small agent-submit-note">{copy.submitNote}</p>
++        </>
++      )}
++
++      <p className="agent-unverified"><IconShield size={13} /> {copy.unverified}</p>
++    </section>
++  )
++}
++
++
+ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed, backTo }: {
+   onNavigate?: (section: string, focus?: { skillId: number; roleTitle: string }) => void
+   initialFocus?: { skillId: number; roleTitle: string } | null
+@@ -706,6 +935,7 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
+             if (item) void toggleStep(item, n)
+           }}
+           onCompetencyChange={setCopilotCompetency}
++          onOpenTopic={(competency, tab) => openLessonTopic(selectedGap.skill_id, competency, tab)}
+         />
+       )}
+ 
+@@ -721,7 +951,7 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
+   )
+ }
+ 
+-function SkillDetailPanel({ studentId, gap, item, path, roleTitle, startSignal, focusSignal, onPathChange, onToggleStep, onCompetencyChange }: {
++function SkillDetailPanel({ studentId, gap, item, path, roleTitle, startSignal, focusSignal, onPathChange, onToggleStep, onCompetencyChange, onOpenTopic }: {
+   studentId: number
+   gap: SkillGap
+   item?: LearningItem
+@@ -732,6 +962,7 @@ function SkillDetailPanel({ studentId, gap, item, path, roleTitle, startSignal,
+   onPathChange?: (path: PersonalizedPath | null) => void
+   onToggleStep: (step: number) => void
+   onCompetencyChange: (competency: string | null) => void
++  onOpenTopic: (competency: string, tab?: LessonTab) => void
+ }) {
+   const [diagRefreshKey, setDiagRefreshKey] = useState(0)
+   return (
+@@ -743,6 +974,8 @@ function SkillDetailPanel({ studentId, gap, item, path, roleTitle, startSignal,
+         topicProgress={topicProgressFor(path, gap.status === 'strong' ? 100 : 0)}
+       />
+ 
++      <LearningAgentPanel studentId={studentId} skillId={gap.skill_id} onOpenTopic={onOpenTopic} />
++
+       <DiagnosticPanel studentId={studentId} skillId={gap.skill_id} skillName={gap.skill_name} startSignal={startSignal} onComplete={() => setDiagRefreshKey(k => k + 1)} />
+ 
+       <PersonalizedPathPanel
+@@ -1905,7 +2138,7 @@ function CareerRoadmapCard({ studentId, roleTitle }: { studentId: number; roleTi
+   if (!map || !Array.isArray(map.phases) || !map.phases.length) return null
+ 
+   return (
+-    <section className="learning-section career-roadmap-section">
++    <section className="learning-section career-roadmap-section" id="career-roadmap">
+       <SectionTitle
+         eyebrow="Career Roadmap"
+         title="High-level career journey"
