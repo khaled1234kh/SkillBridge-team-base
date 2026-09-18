@@ -53,7 +53,7 @@ REMOTEOK_URL = "https://remoteok.com/api"
 ADZUNA_BASE = "https://api.adzuna.com/v1/api/jobs"
 JOBICY_URL = "https://jobicy.com/api/v2/remote-jobs"
 ARBEITNOW_URL = "https://www.arbeitnow.com/api/job-board-api"
-JOOBLE_BASE = "https://api.jooble.org/api"
+JOOBLE_BASE = "https://jooble.org/api"
 JSEARCH_URL = "https://jsearch.p.rapidapi.com/search-v2"
 USAJOBS_URL = "https://data.usajobs.gov/api/search"
 
@@ -3248,13 +3248,26 @@ def recent_jobs(skills=(), role="", country="", location="", limit=10, _sync=Fal
                                 request_id=request_id)
         return {**entry["data"], "status": "stale_fallback"}
 
-    # Cache miss — kick off a background fetch and return an honest
-    # ``unavailable`` empty response immediately so the dashboard request never
-    # blocks on external HTTP calls. Curated/demo jobs are never served here.
+    # Cache miss — kick off a background fetch, then poll for the result
+    # up to 15 seconds. Return cached data as soon as it appears.
+    # On timeout, return the existing unavailable response; the background
+    # fetch continues and populates the cache for the next caller.
     logger.debug("jobs cache miss: key=%s", key)
     _maybe_background_fetch(key, skills, role, country, location, limit,
                             role_requisites=role_requisites, market_country=market_country,
                             request_id=request_id)
+
+    # Poll for cached result up to 15 seconds (250ms intervals)
+    deadline = time.time() + 15.0
+    while time.time() < deadline:
+        with _lock:
+            entry = _cache.get(key)
+        if entry is not None:
+            # Background fetch completed; return live data
+            return {**entry["data"], "status": "live"}
+        time.sleep(0.25)
+
+    # Timeout: return unavailable, background fetch continues for next caller
     return {
         "source": "unavailable",
         "status": "unavailable",
