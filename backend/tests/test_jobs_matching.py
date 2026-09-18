@@ -350,7 +350,7 @@ def test_jooble_results_can_be_included(monkeypatch):
     monkeypatch.setenv("JOOBLE_API_KEY", "test-key")
     monkeypatch.setattr(jobs.httpx, "post", fake_post)
     out = jobs._fetch_jooble(5, ["data", "analyst"], "Egypt")
-    assert captured["url"] == "https://api.jooble.org/api/test-key"
+    assert captured["url"] == "https://jooble.org/api/test-key"
     assert captured["body"]["keywords"] == "data analyst"
     assert captured["body"]["location"] == "Egypt"
     assert out[0]["source"] == "Jooble"

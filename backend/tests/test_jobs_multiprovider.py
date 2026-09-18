@@ -92,7 +92,7 @@ def test_linkedin_normalises_payload(monkeypatch):
     items = jobs._fetch_linkedin_jobs(5, ["dentist"], "Egypt")
 
     assert captured["params"]["location"] == "Egypt"
-    assert captured["params"]["query"] == "dentist"
+    assert captured["params"]["title"] == "dentist"
     assert len(items) == 1
     j = items[0]
     assert j["source"] == "LinkedIn"

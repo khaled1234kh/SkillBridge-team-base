@@ -2588,12 +2588,16 @@ def _extract_job_items(payload):
     return []
 
 
-def _fetch_rapidapi_jobs(name, host_env, path_env, key_env, n, keywords, country=""):
+def _fetch_rapidapi_jobs(name, host_env, path_env, key_env, n, keywords, country="", extra_params=None, suppress_default_params=False):
     """Shared RapidAPI job-search adapter with the existing provider contract.
 
     Returns provider-normalised listings (the same shape JSearch/Jooble emit),
     records health, handles timeouts / 429 rate limits / auth errors, and never
     raises. One provider failing never affects the unified feed.
+
+    extra_params: optional dict of additional query parameters to merge into
+    the request (e.g., LinkedIn requires time_frame and uses 'title' not 'query').
+    suppress_default_params: if True, don't add the default 'query' and 'location' params.
     """
     host, path, key = _provider_rapidapi_cfg(host_env, path_env, key_env, name)
     if not host:
@@ -2605,9 +2609,14 @@ def _fetch_rapidapi_jobs(name, host_env, path_env, key_env, n, keywords, country
         url = f"https://{host}/{path}"
     jobs = []
     try:
+        params = {}
+        if not suppress_default_params:
+            params = {"query": query, "location": country or ""}
+        if extra_params:
+            params.update(extra_params)
         resp = httpx.get(
             url,
-            params={"query": query, "location": country or ""},
+            params=params,
             headers={"X-RapidAPI-Key": key, "X-RapidAPI-Host": host, **_HEADERS},
             timeout=20,
         )
@@ -2693,9 +2702,24 @@ def _fetch_rapidapi_jobs(name, host_env, path_env, key_env, n, keywords, country
 def _fetch_linkedin_jobs(n, keywords, country=""):
     """LinkedIn Job Search via RapidAPI. Exact host + path are config-driven
     (LINKEDIN_JOBS_HOST / LINKEDIN_JOBS_PATH) — the API host is never guessed.
-    Key: RAPIDAPI_LINKEDIN_KEY, falling back to RAPIDAPI_KEY."""
-    return _fetch_rapidapi_jobs("LinkedIn", "LINKEDIN_JOBS_HOST", "LINKEDIN_JOBS_PATH",
-                                "RAPIDAPI_LINKEDIN_KEY", n, keywords, country)
+    Key: RAPIDAPI_LINKEDIN_KEY, falling back to RAPIDAPI_KEY.
+
+    LinkedIn API requires:
+    - time_frame (required): 1h, 24h, 7d, 6m
+    - title (instead of query): search keywords
+    - location (optional): job location
+    """
+    # LinkedIn uses 'title' instead of 'query', and requires time_frame
+    return _fetch_rapidapi_jobs(
+        "LinkedIn", "LINKEDIN_JOBS_HOST", "LINKEDIN_JOBS_PATH",
+        "RAPIDAPI_LINKEDIN_KEY", n, keywords, country,
+        extra_params={
+            "time_frame": "24h",  # required; can be overridden if needed
+            "title": " ".join(keywords[:5]) if keywords else "",
+            "location": country or "",
+        },
+        suppress_default_params=True
+    )
 
 
 def _fetch_google_jobs(n, keywords, country=""):
