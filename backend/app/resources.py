@@ -698,6 +698,15 @@ _TOPIC_CURATED = {
         ),
         _lesson_res(
             "doc",
+            "Docker overview",
+            "https://docs.docker.com/get-started/overview/",
+            "Docker",
+            topics=("docker", "fundamentals", "basic commands", "cli"),
+            levels=("Beginner",),
+            reason="Official high-level overview of Docker, the CLI, and the container workflow.",
+        ),
+        _lesson_res(
+            "doc",
             "What is an image?",
             "https://docs.docker.com/get-started/docker-concepts/the-basics/what-is-an-image/",
             "Docker",
@@ -722,6 +731,15 @@ _TOPIC_CURATED = {
             topics=("dockerfile", "images", "build", "copy", "run"),
             levels=("Intermediate", "Advanced"),
             reason="Authoritative syntax reference for writing and debugging Dockerfiles.",
+        ),
+        _lesson_res(
+            "doc",
+            "Dockerfile best practices",
+            "https://docs.docker.com/build/building/best-practices/",
+            "Docker",
+            topics=("dockerfile", "build", "cache", "layers", "best practices"),
+            levels=("Intermediate", "Advanced"),
+            reason="Official guidance on layer ordering, caching, and keeping images small.",
         ),
         _lesson_res(
             "doc",

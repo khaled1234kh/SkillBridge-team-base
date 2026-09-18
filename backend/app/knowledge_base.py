@@ -619,6 +619,535 @@ DOCKER_IMAGES = {
 }
 
 
+DOCKER_BASIC_COMMANDS = {
+    "status": "complete",
+    "skill_aliases": ("docker", "docker & containers"),
+    "competency": "Basic commands",
+    "objective": "Run the most common Docker CLI commands that inspect and interact with containers and images.",
+    "objectives": [
+        "Verify the Docker installation with `docker --version` and `docker info`.",
+        "Pull and run a one-off container with `docker run --rm`.",
+        "List running and stopped containers with `docker ps` and `docker ps -a`.",
+        "List local images with `docker images`.",
+        "Read container output with `docker logs` and run commands inside a container with `docker exec`.",
+        "Clean up stopped containers and unused images with `docker rm` and `docker rmi`.",
+    ],
+    "prerequisites": [],
+    "roadmap_rationale": (
+        "Basic commands follows Containers and Images because the learner already knows what a "
+        "container and image are; this topic turns those concepts into the everyday CLI actions "
+        "every Docker user performs."
+    ),
+    "learn": {
+        "title": "Basic commands",
+        "explanation": (
+            "The Docker CLI is a single command-line tool. A small set of verbs handles most "
+            "day-to-day work: `run`, `ps`, `images`, `logs`, `exec`, `rm`, `rmi`, and `info`. "
+            "Flags like `--rm` (delete the container when it exits) and `-it` (interactive + TTY) "
+            "change how a command behaves without changing what it does."
+        ),
+        "key_ideas": [
+            "`docker --version` and `docker info` prove Docker is installed and show engine details.",
+            "`docker run --rm hello-world` downloads the image if needed, runs the container once, and removes it when it exits.",
+            "`docker ps` lists running containers; `docker ps -a` also shows stopped ones. `docker images` lists local images.",
+            "`docker logs <container>` prints output; `docker exec -it <container> <command>` runs a command inside a running container.",
+            "`docker rm <container>` removes a stopped container; `docker rmi <image>` removes an unused image.",
+        ],
+        "key_terms": {
+            "docker cli": "The unified command-line client for Docker Engine.",
+            "--rm": "Flag that automatically deletes a container after it stops.",
+            "-it": "Flags that make a container interactive with a terminal (`-i` stdin, `-t` TTY).",
+            "exec": "The `docker exec` command that runs a process inside an already-running container.",
+        },
+        "job_relevance": (
+            "Checking versions, running one-off containers, reading logs, opening a shell to debug, "
+            "and cleaning up are daily tasks for anyone working with Docker."
+        ),
+        "real_world_example": (
+            "You join a new team and need to confirm the environment before running the project. "
+            "`docker --version` and `docker info` confirm Docker is healthy; `docker ps` and "
+            "`docker images` show what is already running and stored; `docker run --rm hello-world` "
+            "proves you can pull and run. In five commands you have a working baseline."
+        ),
+        "common_mistake": (
+            "`docker run --rm` deletes the container only after it stops — it does not delete the image. "
+            "`docker exec` runs a command in a running container; it does not create a new container."
+        ),
+        "worked_example": (
+            "The example verifies Docker, runs a one-off hello-world container, lists containers and "
+            "images, reads logs, opens a shell inside a running container, and cleans up."
+        ),
+        "depth_note": "Canonical beginner content; it is fixed by the curated knowledge base, not generated for a target role.",
+        "version_note": (
+            "Examples use the modern unified Docker CLI (Docker Engine 23 and later). SkillBridge "
+            "does not execute Docker commands; the outputs described are what Docker prints when a "
+            "command succeeds."
+        ),
+        "grounding_sources": [
+            {"title": "Docker CLI reference", "url": "https://docs.docker.com/engine/reference/commandline/docker/", "source": "Docker documentation"},
+            {"title": "docker container run reference", "url": "https://docs.docker.com/reference/cli/docker/container/run/", "source": "Docker documentation"},
+        ],
+    },
+    "example": {
+        "title": "Verify, run, inspect, and clean up",
+        "type": "bash",
+        "content": (
+            "# 1) verify Docker is installed\n"
+            "docker --version\n"
+            "\n"
+            "# 2) run a one-off container that removes itself on exit\n"
+            "docker run --rm hello-world\n"
+            "\n"
+            "# 3) list running and stored containers/images\n"
+            "docker ps\n"
+            "docker ps -a\n"
+            "docker images\n"
+            "\n"
+            "# 4) read logs and open a shell in a running container named api\n"
+            "docker logs api\n"
+            "docker exec -it api /bin/sh\n"
+            "\n"
+            "# 5) clean up a stopped container and an unused image\n"
+            "docker rm old\n"
+            "docker rmi myapp:0.1"
+        ),
+        "explanation": (
+            "These commands cover the daily lifecycle outside of building images: verify the tool, "
+            "run a quick smoke test, inspect what exists, debug a running service, and remove "
+            "artifacts that are no longer needed. Worked example for reading — SkillBridge does not "
+            "run these commands."
+        ),
+    },
+    "practice": {
+        "type": "practical",
+        "title": "Inspect and clean up a local Docker environment",
+        "task": (
+            "You have inherited a laptop with Docker already installed. Write the Docker commands "
+            "you would run to: (1) confirm Docker is installed and show its version, (2) list all "
+            "running containers and all stopped containers, (3) list all local images, (4) run a "
+            "one-off `hello-world` container that removes itself when it exits, (5) read the logs "
+            "of a running container named `api`, (6) open an interactive shell inside the running "
+            "`api` container to inspect a file, and (7) remove a stopped container named `old` and "
+            "an unused image `myapp:0.1`. For each command, add one line stating the output you "
+            "expect or how you verify it worked. SkillBridge reviews your commands as text only — "
+            "it never executes them."
+        ),
+        "response_type": "command",
+        "competency": "Basic commands",
+        "evaluation_note": (
+            "Static text review only: SkillBridge checks for `docker --version` or `docker info`, "
+            "`docker ps` / `docker ps -a`, `docker images`, `docker run --rm hello-world`, "
+            "`docker logs api`, `docker exec -it api ...`, `docker rm old`, and `docker rmi myapp:0.1`, "
+            "plus a stated verification step for each. It does not run Docker, so the review cannot "
+            "prove runtime results. A strong answer names the target container/image and states "
+            "what success looks like for every step. A weak answer skips verification, confuses "
+            "`exec` with `run`, or omits the cleanup commands."
+        ),
+    },
+    "mini_check": {
+        "questions": [
+            {"id": "b1", "type": "mcq", "question": "Which flag removes a container automatically after it exits?", "options": ["--rm", "-d", "-p", "--name"], "correct_answer": "--rm", "competency": "Basic commands", "difficulty": "beginner", "misconception_hint": "Think about the flag whose whole purpose is cleanup on stop."},
+            {"id": "b2", "type": "mcq", "question": "What is the difference between `docker ps` and `docker ps -a`?", "options": ["`ps` lists only running containers; `ps -a` also lists stopped ones", "`ps -a` deletes stopped containers", "`ps` shows images", "There is no difference"], "correct_answer": "`ps` lists only running containers; `ps -a` also lists stopped ones", "competency": "Basic commands", "difficulty": "beginner", "misconception_hint": "The `-a` flag widens the listing to include containers that have exited."},
+            {"id": "b3", "type": "mcq", "question": "Which command runs a shell inside an already-running container named `api`?", "options": ["docker exec -it api /bin/sh", "docker run api /bin/sh", "docker start api /bin/sh", "docker logs api /bin/sh"], "correct_answer": "docker exec -it api /bin/sh", "competency": "Basic commands", "difficulty": "beginner", "misconception_hint": "One command is meant for entering a running container; the others create or control containers."},
+        ]
+    },
+    "locales": {
+        "ar": {
+            "learn": {
+                "title": "الأوامر الأساسية في Docker",
+                "explanation": "أداة سطر الأوامر Docker CLI هي أداة واحدة. مجموعة صغيرة من الأفعال بتغطي أغلب الشغل اليومي: `run`، `ps`، `images`، `logs`، `exec`، `rm`، `rmi`، و`info`. الفلاغات زي `--rm` (بيحذف الحاوية لما تخلص) و`-it` (تفاعلي + ترمينال) بتغيّر سلوك الأمر من غير ما تغيّر وظيفته.",
+                "key_ideas": [
+                    "`docker --version` و`docker info` بيثبتوا إن Docker مركّب وبيورو تفاصيل الـ engine.",
+                    "`docker run --rm hello-world` بينزّل الصورة لو محتاجة، ويشغّل الحاوية مرة واحدة، ويحذفها لما تخلص.",
+                    "`docker ps` بيوريك الحاويات الشغالة؛ `docker ps -a` بيضيف كمان اللي واقفة. `docker images` بيوريك الصور المحلية.",
+                    "`docker logs <container>` بيطبع المخرجات؛ `docker exec -it <container> <command>` بيشغّل أمر جوه حاوية شغالة.",
+                    "`docker rm <container>` بيحذف حاوية واقفة؛ `docker rmi <image>` بيحذف صورة مش مستخدمة.",
+                ],
+                "key_terms": {"docker cli": "عميل سطر الأوامر الموحّد لـ Docker Engine.", "--rm": "فلاغ بيحذف الحاوية تلقائيًا بعد ما تخلص.", "-it": "فلاغات بتخلي الحاوية تفاعلية مع ترمينال (`-i` stdin، `-t` TTY).", "exec": "الأمر `docker exec` اللي بيشغّل عملية جوه حاوية شغالة أصلاً."},
+                "job_relevance": "التحقق من الإصدارات، تشغيل حاويات مؤقتة، قراية الـ logs، فتح شل للتصحيح، والتنظيف هي مهام يومية لأي حد بيشتغل بـ Docker.",
+                "real_world_example": "بتنضم لفريق جديد وعايز تتأكد من البيئة قبل ما تشغّل المشروع. `docker --version` و`docker info` بيثبتوا إن Docker سليم؛ `docker ps` و`docker images` بيوروك إيه اللي شغال ومخزّن؛ `docker run --rm hello-world` بيثبت إنك تقدر تنزّل وتشغّل. في خمس أوامر عندك baseline شغّالة.",
+                "common_mistake": "`docker run --rm` بيحذف الحاوية بس بعد ما تخلص — مش بيحذف الصورة. `docker exec` بيشغّل أمر جوه حاوية شغالة؛ مش بيعمل حاوية جديدة.",
+                "worked_example": "المثال بيتأكد من Docker، بيشغّل حاوية hello-world مرة واحدة، بيسرد الحاويات والصور، بيقرا الـ logs، بيفتح شل جوه حاوية شغالة، وبينضّف في الآخر.",
+                "depth_note": "محتوى تأسيسي ثابت من قاعدة المعرفة المراجَعة، مش محتوى مولّد حسب الوظيفة.",
+                "version_note": "الأمثلة تستخدم الـ Docker CLI الحديث (Docker Engine 23 وما بعده). SkillBridge ما بينفّذش أوامر Docker؛ المخرجات الموصوفة هي اللي Docker بيطبعها لما الأمر ينجح.",
+                "grounding_sources": [
+                    {"title": "مرجع Docker CLI", "url": "https://docs.docker.com/engine/reference/commandline/docker/", "source": "Docker documentation"},
+                    {"title": "مرجع docker container run", "url": "https://docs.docker.com/reference/cli/docker/container/run/", "source": "Docker documentation"},
+                ],
+            },
+            "example": {
+                "title": "تحقق وشغّل وافحص ونضّف",
+                "type": "bash",
+                "content": "# 1) verify Docker is installed\ndocker --version\n\n# 2) run a one-off container that removes itself on exit\ndocker run --rm hello-world\n\n# 3) list running and stored containers/images\ndocker ps\ndocker ps -a\ndocker images\n\n# 4) read logs and open a shell in a running container named api\ndocker logs api\ndocker exec -it api /bin/sh\n\n# 5) clean up a stopped container and an unused image\ndocker rm old\ndocker rmi myapp:0.1",
+                "explanation": "الأوامر دي بتغطي دورة الحياة اليومية برّا بناء الصور: تأكد من الأداة، شغّل اختبار سريع، افحص الموجود، صحّح حاوية شغالة، وامسح اللي مش محتاجه. مثال للقراية — SkillBridge ما بينفّذش الأوامر دي.",
+            },
+            "practice": {
+                "title": "افحص ونضّف بيئة Docker محلية",
+                "task": "عندك لابتوب فيه Docker مركّب. اكتب أوامر Docker اللي هتشغّلها عشان: (١) تتأكد إن Docker مركّب وتوري الإصدار، (٢) تسرد كل الحاويات الشغالة واللي واقفة، (٣) تسرد كل الصور المحلية، (٤) تشغّل حاوية `hello-world` مرة واحدة وتحذف نفسها لما تخلص، (٥) تقرا الـ logs بتاعة حاوية `api`، (٦) تفتح شل تفاعلي جوه حاوية `api` عشان تفحص ملف، و(٧) تحذف حاوية واقفة اسمها `old` وصورة مش مستخدمة `myapp:0.1`. مع كل أمر اكتب سطر يقول المخرج المتوقع أو إزاي هتتأكد إنه اشتغل. SkillBridge بيراجع أوامرك كنص بس — مش بينفّذها.",
+                "response_type": "command",
+                "competency": "Basic commands",
+                "evaluation_note": "مراجعة نصية ثابتة فقط: SkillBridge بيتأكد من `docker --version` أو `docker info`، و`docker ps` / `docker ps -a`، و`docker images`، و`docker run --rm hello-world`، و`docker logs api`، و`docker exec -it api ...`، و`docker rm old`، و`docker rmi myapp:0.1`، ومن وجود خطوة تحقق لكل أمر. مش بيشغّل Docker، فالمراجعة ما بتثبتش نتيجة تشغيل. الإجابة القوية بتسمّي الحاوية/الصورة المستهدفة وتقول النجاح شكله إيه في كل خطوة. الإجابة الضعيفة بتتخطّى التحقق، أو تخلط بين `exec` و`run`، أو تنسى أوامر التنظيف.",
+            },
+            "mini_check": {"questions": [
+                {"id": "b1", "question": "أي فلاغ بيحذف الحاوية تلقائيًا بعد ما تخلص؟", "options": ["--rm", "-d", "-p", "--name"], "misconception_hint": "فكّر في الفلاغ اللي وظيفته الأساسية التنظيف بعد التوقف."},
+                {"id": "b2", "question": "إيه الفرق بين `docker ps` و`docker ps -a`؟", "options": ["`ps` بيوري الحاويات الشغالة بس؛ `ps -a` بيضيف كمان اللي واقفة", "`ps -a` بيحذف الحاويات الوقفة", "`ps` بيوري الصور", "مفيش فرق"], "misconception_hint": "الفلاغ `-a` بيوسّع القايمة عشان تشمل الحاويات اللي خلصت."},
+                {"id": "b3", "question": "أي أمر بيشغّل شل جوه حاوية شغالة اسمها `api`؟", "options": ["docker exec -it api /bin/sh", "docker run api /bin/sh", "docker start api /bin/sh", "docker logs api /bin/sh"], "misconception_hint": "أمر واحد مخصوص للدخول لحاوية شغالة؛ الباقي بيعمل أو بيتحكم في حاويات."},
+            ]},
+        },
+    },
+}
+
+
+DOCKER_DOCKERFILE = {
+    "status": "complete",
+    "skill_aliases": ("docker", "docker & containers"),
+    "competency": "Dockerfile",
+    "objective": "Write a Dockerfile that builds a small, reproducible image using FROM, COPY, RUN, CMD, and EXPOSE.",
+    "objectives": [
+        "Explain that a Dockerfile is a recipe that builds an image in ordered layers.",
+        "Pin a base image version with FROM instead of using :latest.",
+        "Copy source files with COPY and install dependencies with RUN.",
+        "Set the default container command with CMD.",
+        "Document the intended listening port with EXPOSE.",
+    ],
+    "prerequisites": [
+        {
+            "competency": "Images",
+            "relationship": "required foundation",
+            "why": "A Dockerfile produces an image; you need to understand tags, layers, and image storage before writing a recipe that creates one.",
+        },
+    ],
+    "roadmap_rationale": (
+        "Dockerfile follows Images because every Dockerfile builds an image. Knowing how tags, "
+        "layers, and local image storage work makes the build process meaningful."
+    ),
+    "learn": {
+        "title": "Dockerfile",
+        "explanation": (
+            "A Dockerfile is a text recipe that tells Docker how to build an image. Each instruction "
+            "creates a layer. `FROM` chooses the starting image, `COPY` adds files from the build "
+            "context, `RUN` executes commands during the build, `CMD` sets the default command for "
+            "containers started from the image, and `EXPOSE` documents the port the service listens on."
+        ),
+        "key_ideas": [
+            "A Dockerfile builds an image; `docker build -t myapp:1.0 .` tags the result.",
+            "`FROM python:3.12-slim` pins a specific base image; avoid `:latest` for reproducible builds.",
+            "Order matters for caching: copy dependency files first, install, then copy source code.",
+            "`CMD` is the default command when a container starts; it can be overridden at runtime.",
+            "`EXPOSE` documents the port but does not publish it — `-p` is still required on `docker run`.",
+        ],
+        "key_terms": {
+            "dockerfile": "A text file containing instructions for building a Docker image.",
+            "FROM": "Sets the base image for the build.",
+            "COPY": "Copies files from the build context into the image.",
+            "RUN": "Executes a command during image build, creating a new layer.",
+            "CMD": "Sets the default command for containers started from the image.",
+            "EXPOSE": "Documents the port the container service listens on.",
+            "build context": "The set of files Docker can see while building, usually the directory containing the Dockerfile.",
+        },
+        "job_relevance": (
+            "Almost every containerized project ships a Dockerfile. Writing one that is small, "
+            "cache-friendly, and reproducible is a standard backend and DevOps task."
+        ),
+        "real_world_example": (
+            "Your Python API needs a reproducible deploy image. You write a Dockerfile starting "
+            "`FROM python:3.12-slim`, copy `requirements.txt` and run `pip install`, then copy the "
+            "source and set `CMD [\"python\", \"app.py\"]`. Now any teammate builds the exact same image "
+            "with `docker build -t api:1.0 .`."
+        ),
+        "common_mistake": (
+            "Do not use `:latest` in FROM in production: it makes the build non-reproducible. Also, "
+            "EXPOSE does not publish the port by itself; you still need `-p` when running the container."
+        ),
+        "worked_example": (
+            "The example writes a small Python API Dockerfile, builds it with a pinned tag, and runs "
+            "a container from the resulting image."
+        ),
+        "depth_note": "Canonical intermediate content; it is fixed by the curated knowledge base, not generated for a target role.",
+        "version_note": (
+            "Examples use Dockerfile syntax compatible with Docker Engine 23+ and BuildKit. SkillBridge "
+            "does not execute Docker commands."
+        ),
+        "grounding_sources": [
+            {"title": "Dockerfile reference", "url": "https://docs.docker.com/reference/dockerfile/", "source": "Docker documentation"},
+            {"title": "Dockerfile best practices", "url": "https://docs.docker.com/build/building/best-practices/", "source": "Docker documentation"},
+        ],
+    },
+    "example": {
+        "title": "Build a tiny Python API image",
+        "type": "bash",
+        "content": (
+            "# Dockerfile\n"
+            "FROM python:3.12-slim\n"
+            "WORKDIR /app\n"
+            "COPY requirements.txt .\n"
+            "RUN pip install --no-cache-dir -r requirements.txt\n"
+            "COPY . .\n"
+            "EXPOSE 8000\n"
+            "CMD [\"python\", \"app.py\"]\n"
+            "\n"
+            "# Build and run\n"
+            "docker build -t api:1.0 .\n"
+            "docker run -d --name api -p 8080:8000 api:1.0"
+        ),
+        "explanation": (
+            "The Dockerfile orders layers for caching: dependencies are installed before the source "
+            "is copied, so code-only changes reuse the install layer. `EXPOSE` documents port 8000, "
+            "and `-p 8080:8000` actually publishes it. Worked example for reading — SkillBridge does "
+            "not run these commands."
+        ),
+    },
+    "practice": {
+        "type": "practical",
+        "title": "Write a Dockerfile for a Node.js service",
+        "task": (
+            "Write a Dockerfile for a Node.js service and the commands to build and run it. Requirements: "
+            "(1) Pin a specific Node version in FROM (not `:latest`), (2) set a working directory, "
+            "(3) copy `package.json` and `package-lock.json` first and run `npm install` to leverage "
+            "layer caching, (4) copy the rest of the source, (5) set the default command to "
+            "`node server.js`, (6) document that the service listens on port 3000. Then write the "
+            "commands to build the image tagged `myapi:1.0` and run a container named `myapi` that "
+            "maps host port 8080 to container port 3000. Add one sentence explaining why you copy "
+            "the package files before the source. SkillBridge reviews your Dockerfile and commands "
+            "as text only — it never executes them."
+        ),
+        "response_type": "configuration",
+        "competency": "Dockerfile",
+        "evaluation_note": (
+            "Static text review only: SkillBridge checks for a pinned FROM, WORKDIR, COPY of package "
+            "files before source, RUN npm install, COPY of remaining source, EXPOSE 3000, CMD "
+            "node server.js, `docker build -t myapi:1.0 .`, and `docker run -d --name myapi -p 8080:3000 myapi:1.0`, "
+            "plus an explanation of layer caching. It does not run Docker, so the review cannot prove "
+            "runtime results. A strong answer pins a version, orders COPY for caching, and distinguishes "
+            "EXPOSE from `-p`. A weak answer uses `:latest`, copies everything in one step, or omits "
+            "the port mapping."
+        ),
+    },
+    "mini_check": {
+        "questions": [
+            {"id": "d1", "type": "mcq", "question": "Which Dockerfile instruction sets the base image?", "options": ["FROM", "COPY", "RUN", "CMD"], "correct_answer": "FROM", "competency": "Dockerfile", "difficulty": "beginner", "misconception_hint": "Every Dockerfile starts by choosing what image to build on top of."},
+            {"id": "d2", "type": "mcq", "question": "Why is `COPY requirements.txt .` followed by `RUN pip install` before copying the rest of the source?", "options": ["It lets Docker reuse the installed-dependency layer when only code changes", "It makes the image larger", "It is required by the Dockerfile syntax", "It prevents the container from starting"], "correct_answer": "It lets Docker reuse the installed-dependency layer when only code changes", "competency": "Dockerfile", "difficulty": "intermediate", "misconception_hint": "Think about which layers are invalidated when source files change."},
+            {"id": "d3", "type": "mcq", "question": "What does `EXPOSE 3000` do?", "options": ["Documents that the container service listens on port 3000", "Publishes port 3000 to the host automatically", "Forces the container to use port 3000", "Creates a Docker network"], "correct_answer": "Documents that the container service listens on port 3000", "competency": "Dockerfile", "difficulty": "beginner", "misconception_hint": "Publishing to the host requires a runtime flag, not just EXPOSE."},
+        ]
+    },
+    "locales": {
+        "ar": {
+            "learn": {
+                "title": "Dockerfile",
+                "explanation": "Dockerfile هو وصفة نصية بتقول لـ Docker إزاي تبني صورة. كل تعليمة بتعمل طبقة. `FROM` بيختار الصورة الأساسية، `COPY` بيضيف ملفات من سياق البناء، `RUN` بينفّذ أوامر أثناء البناء، `CMD` بيحدد الأمر الافتراضي لما الحاوية تبدأ، و`EXPOSE` بيوثّق البورت اللي الخدمة بتسمع عليه.",
+                "key_ideas": [
+                    "الـ Dockerfile بيبني صورة؛ `docker build -t myapp:1.0 .` بيعمل تاج للنتيجة.",
+                    "`FROM python:3.12-slim` بيثبّت صورة أساسية محددة؛ تجنّب `:latest` عشان البناء يتكرر بنفس الشكل.",
+                    "الترتيب مهم للكاش: انسخ ملفات الاعتماديات الأول، ثبّتها، وبعدين انسخ الكود.",
+                    "`CMD` هو الأمر الافتراضي لما الحاوية تبدأ؛ ممكن يتجاوز وقت التشغيل.",
+                    "`EXPOSE` بيوثّق البورت بس مش بينشره — لسه محتاج `-p` في `docker run`.",
+                ],
+                "key_terms": {"dockerfile": "ملف نصي بيحتوي على تعليمات لبناء صورة Docker.", "FROM": "بيحدد الصورة الأساسية للبناء.", "COPY": "بينسخ ملفات من سياق البناء للصورة.", "RUN": "بينفّذ أمر أثناء بناء الصورة ويعمل طبقة جديدة.", "CMD": "بيحدد الأمر الافتراضي للحاويات اللي بتبدأ من الصورة.", "EXPOSE": "بيوثّق البورت اللي خدمة الحاوية بتسمع عليه.", "build context": "مجموعة الملفات اللي Docker شايفها وقت البناء، عادة المجلد اللي فيه الـ Dockerfile."},
+                "job_relevance": "تقريبًا كل مشروع بيستخدم حاويات بيشحن Dockerfile. كتابة Dockerfile صغيرة، صديقة للكاش، وقابلة للتكرار هي مهمة أساسية لـ backend وDevOps.",
+                "real_world_example": "الـ API بتاع Python محتاج صورة نشر قابلة للتكرار. بتكتب Dockerfile يبدأ بـ `FROM python:3.12-slim`، بتنسخ `requirements.txt` وتشغّل `pip install`، وبعدين بتنسخ المصدر وتحدد `CMD [\"python\", \"app.py\"]`. دلوقتي أي زميل يقدر يبني نفس الصورة بالظبط بـ `docker build -t api:1.0 .`.",
+                "common_mistake": "ما تستخدمش `:latest` في FROM في الإنتاج: ده بيخلي البناء مش قابل للتكرار. كمان EXPOSE مش بينشر البورت لوحده؛ لسه محتاج `-p` وقت تشغيل الحاوية.",
+                "worked_example": "المثال بيكتب Dockerfile صغير لـ Python API، يبنيه بتاج مثبت، ويشغّل حاوية من الصورة الناتجة.",
+                "depth_note": "محتوى متوسط ثابت من قاعدة المعرفة المراجَعة، مش محتوى مولّد حسب الوظيفة.",
+                "version_note": "الأمثلة تستخدم صيغة Dockerfile متوافقة مع Docker Engine 23+ وBuildKit. SkillBridge ما بينفّذش أوامر Docker.",
+                "grounding_sources": [
+                    {"title": "مرجع Dockerfile", "url": "https://docs.docker.com/reference/dockerfile/", "source": "Docker documentation"},
+                    {"title": "أفضل ممارسات Dockerfile", "url": "https://docs.docker.com/build/building/best-practices/", "source": "Docker documentation"},
+                ],
+            },
+            "example": {
+                "title": "ابنِ صورة Python API صغيرة",
+                "type": "bash",
+                "content": "# Dockerfile\nFROM python:3.12-slim\nWORKDIR /app\nCOPY requirements.txt .\nRUN pip install --no-cache-dir -r requirements.txt\nCOPY . .\nEXPOSE 8000\nCMD [\"python\", \"app.py\"]\n\n# Build and run\ndocker build -t api:1.0 .\ndocker run -d --name api -p 8080:8000 api:1.0",
+                "explanation": "الـ Dockerfile بيرتّب الطبقات عشان الكاش: الاعتماديات تتثبّت قبل ما يتنسخ الكود، فلو اتغيّر الكود بس بيُستخدم طبقة التثبيت القديمة. `EXPOSE` بيوثّق بورت 8000، و`-p 8080:8000` هو اللي بينشره فعليًا. مثال للقراية — SkillBridge ما بينفّذش الأوامر دي.",
+            },
+            "practice": {
+                "title": "اكتب Dockerfile لخدمة Node.js",
+                "task": "اكتب Dockerfile لخدمة Node.js والأوامر اللي هتبني وتشغّلها. المتطلبات: (١) ثبّت نسخة Node معينة في FROM (مش `:latest`)، (٢) حدّد working directory، (٣) انسخ `package.json` و`package-lock.json` الأول وشغّل `npm install` عشان تستفيد من كاش الطبقات، (٤) انسخ باقي المصدر، (٥) حدّد الأمر الافتراضي `node server.js`، (٦) وثّق إن الخدمة بتسمع على بورت 3000. وبعدين اكتب الأوامر اللي هتبني الصورة بـ تاج `myapi:1.0` وتشغّل حاوية اسمها `myapi` بتوصيل بورت 8080 على الجهاز ببورت 3000 جوه الحاوية. ضيف جملة واحدة تشرح ليه بنسخ ملفات الباكج قبل المصدر. SkillBridge بيراجع الـ Dockerfile والأوامر كنص بس — مش بينفّذهم.",
+                "response_type": "configuration",
+                "competency": "Dockerfile",
+                "evaluation_note": "مراجعة نصية ثابتة فقط: SkillBridge بيتأكد من FROM مثبت، وWORKDIR، وCOPY لملفات الباكج قبل المصدر، وRUN npm install، وCOPY باقي المصدر، وEXPOSE 3000، وCMD node server.js، و`docker build -t myapi:1.0 .`، و`docker run -d --name myapi -p 8080:3000 myapi:1.0`، وشرح طبقات الكاش. مش بيشغّل Docker، فالمراجعة ما بتثبتش نتيجة تشغيل. الإجابة القوية بتثبّت نسخة، وترتّب COPY عشان الكاش، وتميّز بين EXPOSE و`-p`. الإجابة الضعيفة بتستخدم `:latest`، أو بتنسخ كل حاجة في خطوة واحدة، أو بتنسى ربط البورت.",
+            },
+            "mini_check": {"questions": [
+                {"id": "d1", "question": "أي تعليمة في Dockerfile بتحدد الصورة الأساسية؟", "options": ["FROM", "COPY", "RUN", "CMD"], "misconception_hint": "كل Dockerfile بيبدأ باختيار الصورة اللي هيبني فوقها."},
+                {"id": "d2", "question": "ليه بنعمل `COPY requirements.txt .` وبعدين `RUN pip install` قبل ما ننسخ باقي المصدر؟", "options": ["عشان Docker تستخدم طبقة تثبيت الاعتماديات تاني لما الكود بس هو اللي يتغير", "عشان الصورة تكبر", "ده مطلوب من صيغة Dockerfile", "عشان الحاوية متبدأش"], "misconception_hint": "فكّر أي الطبقات بتتبطل لما ملفات المصدر تتغير."},
+                {"id": "d3", "question": "إيه اللي بيعمله `EXPOSE 3000`؟", "options": ["بيوثّق إن خدمة الحاوية بتسمع على بورت 3000", "بينشر بورت 3000 على الجهاز تلقائيًا", "بيلزم الحاوية تستخدم بورت 3000", "بينشئ شبكة Docker"], "misconception_hint": "النشر على الجهاز بيتطلب فلاغ وقت التشغيل، مش بس EXPOSE."},
+            ]},
+        },
+    },
+}
+
+
+DOCKER_PORTS = {
+    "status": "complete",
+    "skill_aliases": ("docker", "docker & containers"),
+    "competency": "Ports",
+    "objective": "Publish a container port to the host, inspect port bindings, and understand the difference between EXPOSE and -p.",
+    "objectives": [
+        "Explain that container ports are isolated from the host by default.",
+        "Publish a port with `docker run -p HOST_PORT:CONTAINER_PORT`.",
+        "Inspect bindings with `docker port` and `docker inspect`.",
+        "Distinguish `EXPOSE` in a Dockerfile from `-p` on the CLI.",
+    ],
+    "prerequisites": [
+        {
+            "competency": "Containers",
+            "relationship": "required foundation",
+            "why": "Port publishing only makes sense once you can run a container and name it; the run/stop lifecycle is the context for exposing services.",
+        },
+    ],
+    "roadmap_rationale": (
+        "Ports follows Containers because publishing is meaningless without a running container. "
+        "It bridges the gap between a service running inside a container and a client reaching it "
+        "from the host."
+    ),
+    "learn": {
+        "title": "Ports",
+        "explanation": (
+            "By default, a container's network is isolated. A service listening on port 80 inside "
+            "the container is not reachable from your laptop unless you publish the port with "
+            "`-p HOST_PORT:CONTAINER_PORT` when running it. `EXPOSE` in a Dockerfile only documents "
+            "the intended port; it does not publish it."
+        ),
+        "key_ideas": [
+            "A container port is reachable only from inside the container unless published.",
+            "`docker run -d --name web -p 8080:80 nginx:1.27` maps host port 8080 to container port 80.",
+            "`docker port web` shows the current bindings; `docker inspect web` shows full network details.",
+            "`EXPOSE 80` in a Dockerfile is documentation; `-p 8080:80` at runtime does the actual mapping.",
+            "Use host port 0 or ephemeral ports only when you do not care which host port is assigned.",
+        ],
+        "key_terms": {
+            "container port": "The port a process listens on inside the container.",
+            "host port": "The port on the machine running Docker that is mapped to a container port.",
+            "publish": "To make a container port reachable from outside the container using `-p`.",
+            "EXPOSE": "A Dockerfile instruction that documents the intended listening port.",
+        },
+        "job_relevance": (
+            "Every containerized service that receives traffic — APIs, databases, frontends — must "
+            "publish its port correctly. Misunderstanding EXPOSE versus -p is one of the most common "
+            "reasons a container 'is running but not responding'."
+        ),
+        "real_world_example": (
+            "You run a web container but `curl http://localhost` fails. `docker ps` shows the "
+            "container is up, but there is no `0.0.0.0:80->80/tcp` binding because you forgot `-p`. "
+            "You stop and rerun with `-p 8080:80`, then `curl http://localhost:8080` returns the page."
+        ),
+        "common_mistake": (
+            "`EXPOSE` does not publish a port. A container can `EXPOSE 80` and still be unreachable "
+            "from the host unless you start it with `-p`."
+        ),
+        "worked_example": (
+            "The example starts an nginx container with a published port, verifies the binding, "
+            "and shows the difference between EXPOSE and -p."
+        ),
+        "depth_note": "Canonical intermediate content; it is fixed by the curated knowledge base, not generated for a target role.",
+        "version_note": (
+            "Examples use the modern unified Docker CLI (Docker Engine 23 and later). SkillBridge "
+            "does not execute Docker commands."
+        ),
+        "grounding_sources": [
+            {"title": "Publishing and exposing ports", "url": "https://docs.docker.com/get-started/docker-concepts/running-containers/publishing-ports/", "source": "Docker documentation"},
+            {"title": "docker container run reference", "url": "https://docs.docker.com/reference/cli/docker/container/run/", "source": "Docker documentation"},
+        ],
+    },
+    "example": {
+        "title": "Publish and verify a web container port",
+        "type": "bash",
+        "content": (
+            "# 1) start nginx and publish host port 8080 to container port 80\n"
+            "docker run -d --name web -p 8080:80 nginx:1.27\n"
+            "\n"
+            "# 2) show the port binding\n"
+            "docker port web\n"
+            "\n"
+            "# 3) inspect the network settings\n"
+            "docker inspect --format='{{range $p, $conf := .NetworkSettings.Ports}}{{$p}} -> {{(index $conf 0).HostPort}}{{end}}' web\n"
+            "\n"
+            "# 4) test from the host\n"
+            "curl http://localhost:8080"
+        ),
+        "explanation": (
+            "`-p 8080:80` bridges the host and the container. `docker port` confirms the mapping, "
+            "and `curl` verifies the service is reachable from the host. Worked example for reading — "
+            "SkillBridge does not run these commands."
+        ),
+    },
+    "practice": {
+        "type": "practical",
+        "title": "Expose a containerised API on the correct host port",
+        "task": (
+            "A container named `api` runs a service that listens on port 3000 inside the container, "
+            "but you cannot reach it from your laptop. Write the exact `docker run` command you "
+            "should have used to start it so the service is reachable on host port 8080, and show "
+            "how to verify the binding with `docker port` and `docker inspect`. Then explain the "
+            "difference between `EXPOSE 3000` in the Dockerfile and `-p 8080:3000` on the CLI. "
+            "SkillBridge reviews your commands as text only — it never executes them."
+        ),
+        "response_type": "command",
+        "competency": "Ports",
+        "evaluation_note": (
+            "Static text review only: SkillBridge checks for a `docker run` command that uses "
+            "`-p 8080:3000` (or equivalent) with `--name api`, `docker port api`, `docker inspect` "
+            "to read the binding, and an explanation that EXPOSE documents the port while `-p` "
+            "publishes it to the host. It does not run Docker, so the review cannot prove runtime "
+            "results. A strong answer names the image, states the exact mapping, and gives a concrete "
+            "verify step. A weak answer suggests EXPOSE alone is enough, uses the ports in reverse "
+            "order, or omits verification."
+        ),
+    },
+    "mini_check": {
+        "questions": [
+            {"id": "p1", "type": "mcq", "question": "Which `docker run` flag publishes a container port to the host?", "options": ["-p", "-d", "--name", "--rm"], "correct_answer": "-p", "competency": "Ports", "difficulty": "beginner", "misconception_hint": "Look for the flag that creates the host-to-container port mapping."},
+            {"id": "p2", "type": "mcq", "question": "What does `EXPOSE 3000` in a Dockerfile do?", "options": ["Documents that the service listens on port 3000", "Publishes port 3000 to the host", "Forwards port 3000 automatically", "Creates a network bridge"], "correct_answer": "Documents that the service listens on port 3000", "competency": "Ports", "difficulty": "beginner", "misconception_hint": "Publishing requires a runtime flag, not just a Dockerfile instruction."},
+            {"id": "p3", "type": "mcq", "question": "In `docker run -p 8080:80`, which port belongs to the host?", "options": ["8080", "80", "Both", "Neither"], "correct_answer": "8080", "competency": "Ports", "difficulty": "beginner", "misconception_hint": "The host port is written first in HOST:CONTAINER notation."},
+        ]
+    },
+    "locales": {
+        "ar": {
+            "learn": {
+                "title": "البورتات في Docker",
+                "explanation": "افتراضيًا، شبكة الحاوية معزولة. خدمة بتسمع على بورت 80 جوه الحاوية مش هتوصل من لابتوبك إلا لو نشرت البورت بـ `-p HOST_PORT:CONTAINER_PORT` وقت التشغيل. `EXPOSE` في Dockerfile بيوثّق البورت المقصود بس مش بينشره.",
+                "key_ideas": [
+                    "بورت الحاوية بيوصل من جوه الحاوية بس إلا لو اتنشر.",
+                    "`docker run -d --name web -p 8080:80 nginx:1.27` بيوصّل بورت 8080 على الجهاز ببورت 80 جوه الحاوية.",
+                    "`docker port web` بيوري الربط الحالي؛ `docker inspect web` بيوري تفاصيل الشبكة كاملة.",
+                    "`EXPOSE 80` في Dockerfile مجرد توثيق؛ `-p 8080:80` وقت التشغيل هو اللي بيعمل الربط الفعلي.",
+                    "استخدم بورت 0 على الـ host أو بورتات مؤقتة بس لما يبقى مش مهم أي بورت على الجهاز هيُخصص.",
+                ],
+                "key_terms": {"container port": "البورت اللي العملية بتسمع عليه جوه الحاوية.", "host port": "البورت على الجهاز اللي Docker شغال عليه واللي بيرتبط ببورت الحاوية.", "publish": "إتاحة بورت الحاوية من برّا باستخدام `-p`.", "EXPOSE": "تعليمة في Dockerfile بتوثّق البورت المقصود."},
+                "job_relevance": "كل خدمة في حاوية بتستقبل ترافيك — APIs، قواعد بيانات، frontends — لازم تنشر بورتها صح. عدم الفهم الفرق بين EXPOSE و -p من أشهر أسباب إن الحاوية «شغالة بس مش بترد».",
+                "real_world_example": "بتشغّل حاوية ويب بس `curl http://localhost` بيفشل. `docker ps` بيوريك إنها شغالة، بس مفيش ربط `0.0.0.0:80->80/tcp` عشان نسيت `-p`. بتوقفها وتشغّلها تاني بـ `-p 8080:80`، وبعدين `curl http://localhost:8080` بيرجّع الصفحة.",
+                "common_mistake": "`EXPOSE` مش بينشر البورت. الحاوية ممكن تكون عاملة `EXPOSE 80` وماتبقاش قابلة للوصول من الجهاز إلا لو تشغّلت بـ `-p`.",
+                "worked_example": "المثال بيشغّل حاوية nginx بنشر بورت، بيتأكد من الربط، وبيوري الفرق بين EXPOSE و -p.",
+                "depth_note": "محتوى متوسط ثابت من قاعدة المعرفة المراجَعة، مش محتوى مولّد حسب الوظيفة.",
+                "version_note": "الأمثلة تستخدم الـ Docker CLI الحديث (Docker Engine 23 وما بعده). SkillBridge ما بينفّذش أوامر Docker.",
+                "grounding_sources": [
+                    {"title": "نشر وإتاحة البورتات", "url": "https://docs.docker.com/get-started/docker-concepts/running-containers/publishing-ports/", "source": "Docker documentation"},
+                    {"title": "مرجع docker container run", "url": "https://docs.docker.com/reference/cli/docker/container/run/", "source": "Docker documentation"},
+                ],
+            },
+            "example": {
+                "title": "انشر بورت حاوية ويب وتأكد منه",
+                "type": "bash",
+                "content": "# 1) start nginx and publish host port 8080 to container port 80\ndocker run -d --name web -p 8080:80 nginx:1.27\n\n# 2) show the port binding\ndocker port web\n\n# 3) inspect the network settings\ndocker inspect --format='{{range $p, $conf := .NetworkSettings.Ports}}{{$p}} -> {{(index $conf 0).HostPort}}{{end}}' web\n\n# 4) test from the host\ncurl http://localhost:8080",
+                "explanation": "`-p 8080:80` بيوصل الجهاز بالحاوية. `docker port` بيثبت الربط، و`curl` بيثبت إن الخدمة قابلة للوصول من الجهاز. مثال للقراية — SkillBridge ما بينفّذش الأوامر دي.",
+            },
+            "practice": {
+                "title": "أتاح API في الحاوية على البورت الصح",
+                "task": "حاوية اسمها `api` شغالة بخدمة بتسمع على بورت 3000 جوهها، بس مش قادرة توصلها من لابتوبك. اكتب أمر `docker run` المظبوط اللي كان المفروض تشغّل بيه الحاوية عشان الخدمة تكون قابلة للوصول على بورت 8080 على الجهاز، وورّي إزاي تتأكد من الربط بـ `docker port` و`docker inspect`. وبعدين اشرح الفرق بين `EXPOSE 3000` في Dockerfile و`-p 8080:3000` في سطر الأوامر. SkillBridge بيراجع أوامرك كنص بس — مش بينفّذها.",
+                "response_type": "command",
+                "competency": "Ports",
+                "evaluation_note": "مراجعة نصية ثابتة فقط: SkillBridge بيتأكد من أمر `docker run` بيستخدم `-p 8080:3000` (أو ما يعادله) مع `--name api`، و`docker port api`، و`docker inspect` لقراية الربط، وشرح إن EXPOSE بيوثّق البورت بينما `-p` بينشره على الجهاز. مش بيشغّل Docker، فالمراجعة ما بتثبتش نتيجة تشغيل. الإجابة القوية بتسمّي الصورة، وتحدد الربط بالظبط، وتعطي خطوة تحقق عملية. الإجابة الضعيفة بتقول إن EXPOSE كفاية لوحده، أو تستخدم البورتات بترتيب عكسي، أو تتخطّى التحقق.",
+            },
+            "mini_check": {"questions": [
+                {"id": "p1", "question": "أي فلاغ في `docker run` بينشر بورت الحاوية على الجهاز؟", "options": ["-p", "-d", "--name", "--rm"], "misconception_hint": "دور على الفلاغ اللي بيعمل ربط من بورت الجهاز لبورت الحاوية."},
+                {"id": "p2", "question": "إيه اللي بيعمله `EXPOSE 3000` في Dockerfile؟", "options": ["بيوثّق إن الخدمة بتسمع على بورت 3000", "بينشر بورت 3000 على الجهاز", "بيفوّر البورت تلقائيًا", "بينشئ شبكة Docker"], "misconception_hint": "النشر على الجهاز بيتطلب فلاغ وقت التشغيل، مش بس تعليمة في Dockerfile."},
+                {"id": "p3", "question": "في `docker run -p 8080:80`، أي بورت تبع الجهاز؟", "options": ["8080", "80", "الاتنين", "ولا واحد"], "misconception_hint": "بورت الجهاز هو اللي بيكتب الأول في صيغة HOST:CONTAINER."},
+            ]},
+        },
+    },
+}
+
+
 def curated_diagnostic_questions(skill_name, competencies):
     """Return reviewed diagnostic questions for complete curated topics.
 
@@ -652,6 +1181,17 @@ def curated_diagnostic_questions(skill_name, competencies):
             {"type": "mcq", "question": "What does `docker pull nginx` (no tag) actually download?", "options": ["The `nginx:latest` tag — whichever version it points to today", "Every tag in the repository", "Only the smallest layer", "A digest-pinned snapshot"], "correct_answer": "The `nginx:latest` tag — whichever version it points to today", "competency": "images", "difficulty": "beginner"},
             {"type": "mcq", "question": "Why can `docker rmi nginx:1.27` fail even when the command is typed correctly?", "options": ["A container — even a stopped one — still uses that image", "Images can never be removed", "`rmi` only works on dangling images", "Docker must be stopped first"], "correct_answer": "A container — even a stopped one — still uses that image", "competency": "images", "difficulty": "beginner"},
             {"type": "mcq", "question": "Two images stored locally share most of their layers. What does that mean for disk space?", "options": ["The shared layers are stored once, not duplicated per image", "Each image keeps a full private copy", "The layers are compressed twice", "Docker deletes the older image automatically"], "correct_answer": "The shared layers are stored once, not duplicated per image", "competency": "images", "difficulty": "beginner"},
+        ],
+        # Docker Batch 2 — one reviewed diagnostic question per newly complete topic.
+        # Containers and Images keep their 3-question banks above.
+        "basic commands": [
+            {"type": "mcq", "question": "Which flag removes a container automatically after it exits?", "options": ["--rm", "-d", "-p", "--name"], "correct_answer": "--rm", "competency": "basic_commands", "difficulty": "beginner"},
+        ],
+        "dockerfile": [
+            {"type": "mcq", "question": "Which Dockerfile instruction sets the base image?", "options": ["FROM", "COPY", "RUN", "CMD"], "correct_answer": "FROM", "competency": "dockerfile", "difficulty": "beginner"},
+        ],
+        "ports": [
+            {"type": "mcq", "question": "Which `docker run` flag publishes a container port to the host?", "options": ["-p", "-d", "--name", "--rm"], "correct_answer": "-p", "competency": "ports", "difficulty": "beginner"},
         ],
     }
     if skill_key in PYTHON_FUNCTIONS["skill_aliases"]:
@@ -697,6 +1237,12 @@ def complete_lesson(skill_name, competency):
         return deepcopy(DOCKER_CONTAINERS)
     if _key(skill_name) in DOCKER_IMAGES["skill_aliases"] and _key(competency) in ("images", "docker images"):
         return deepcopy(DOCKER_IMAGES)
+    if _key(skill_name) in DOCKER_BASIC_COMMANDS["skill_aliases"] and _key(competency) in ("basic commands", "basic commands"):
+        return deepcopy(DOCKER_BASIC_COMMANDS)
+    if _key(skill_name) in DOCKER_DOCKERFILE["skill_aliases"] and _key(competency) in ("dockerfile",):
+        return deepcopy(DOCKER_DOCKERFILE)
+    if _key(skill_name) in DOCKER_PORTS["skill_aliases"] and _key(competency) in ("ports",):
+        return deepcopy(DOCKER_PORTS)
     return None
 
 

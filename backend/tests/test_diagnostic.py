@@ -48,9 +48,9 @@ def test_generate_diagnostic_every_question_has_competency(client, docker_skill,
     assert r.status_code == 200, r.text
     body = r.json()
     qs = body["questions"]
-    # Docker now returns one question per blueprint competency (15) to guarantee
-    # all topics are represented; other skills stay within the original 5-9 cap.
-    assert 5 <= len(qs) <= 15
+    # Docker now returns one question per blueprint competency (up to 20) to guarantee
+    # all topics are represented as curated banks grow; other skills stay within the original 5-9 cap.
+    assert 5 <= len(qs) <= 20
     assert body["diagnostic_id"]
     assert body["topics"]
     for q in qs:
@@ -65,7 +65,7 @@ def test_no_blueprint_skill_still_generates(client, tensorflow_skill, aisha_id, 
     r = _generate(client, aisha_id, tensorflow_skill["id"], headers)
     assert r.status_code == 200, r.text
     qs = r.json()["questions"]
-    assert 5 <= len(qs) <= 15
+    assert 5 <= len(qs) <= 20
     assert all(q["competency"] for q in qs)
 
 
@@ -73,7 +73,7 @@ def test_deterministic_fallback_valid(db, docker_skill):
     """Without an API key, generation still yields a structured, tagged, usable diagnostic."""
     comps = diagnostics.resolve_topics(docker_skill["name"])
     qs = genai.generate_diagnostic(docker_skill["name"], comps, "AI Engineer")
-    assert 5 <= len(qs) <= 15
+    assert 5 <= len(qs) <= 20
     for q in qs:
         assert q["id"] and q["question"] and q["competency"]
         if q["type"] == "mcq":

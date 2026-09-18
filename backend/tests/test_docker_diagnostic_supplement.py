@@ -72,17 +72,18 @@ def test_docker_diagnostic_offline_covers_all_11_topics(client, aisha_id,
     }
     actual = {q["competency"] for q in qs}
 
-    assert len(qs) == 15, f"expected 15 questions (one per competency), got {len(qs)}"
+    assert len(qs) == 15, f"expected 15 questions (curated banks + one probe per remaining competency), got {len(qs)}"
     assert actual == expected, f"missing/extra competencies: {expected ^ actual}"
 
-    # Curated Docker topics are MCQs from the reviewed bank
-    curated = [q for q in qs if q["competency"] in ("containers", "images")]
-    assert len(curated) == 6
+    # Curated Docker topics (Batch 1 + Batch 2) are MCQs from the reviewed bank
+    curated_topics = {"containers", "images", "basic_commands", "dockerfile", "ports"}
+    curated = [q for q in qs if q["competency"] in curated_topics]
+    assert len(curated) == 9
     assert all(q["type"] == "mcq" for q in curated)
 
     # Remaining topics fall back to free-text probes when offline
-    fallback = [q for q in qs if q["competency"] not in ("containers", "images")]
-    assert len(fallback) == 9
+    fallback = [q for q in qs if q["competency"] not in curated_topics]
+    assert len(fallback) == 6
     assert all(q["type"] == "free_text" for q in fallback)
 
 
