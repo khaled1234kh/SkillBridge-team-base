@@ -639,11 +639,20 @@ def curated_diagnostic_questions(skill_name, competencies):
             {"type": "mcq", "question": "Where should `int(text)` go when it may fail because the text is not numeric?", "options": ["Inside `try`", "Only inside `except ValueError`", "After `return None`", "Inside a bare `except`"], "correct_answer": "Inside `try`", "competency": "python_error_handling", "difficulty": "beginner"},
             {"type": "mcq", "question": "Why catch `ValueError` rather than using bare `except:` in `parse_score`?", "options": ["It handles invalid numeric text without hiding unrelated bugs", "It converts every string", "It avoids using return", "It executes faster"], "correct_answer": "It handles invalid numeric text without hiding unrelated bugs", "competency": "python_error_handling", "difficulty": "beginner"},
 ],
-        # Note: Docker containers/images diagnostic banks temporarily removed to
-        # restore full 11-topic diagnostic coverage via fallback path.
-        # Curated lesson content (DOCKER_CONTAINERS, DOCKER_IMAGES) remains intact.
-        # Re-add when Eslam decides whether curated banks should replace or
-        # supplement fallback diagnostic questions.
+        # Docker Batch 1 — curated diagnostic banks for the topics that are complete.
+        # These SUPPLEMENT the AI fallback; uncovered Docker competencies still get
+        # AI-generated (or deterministic fallback) questions so all 11 blueprint
+        # topics are represented.
+        "containers": [
+            {"type": "mcq", "question": "Which command lists containers that have already stopped?", "options": ["docker ps", "docker ps -a", "docker logs", "docker images"], "correct_answer": "docker ps -a", "competency": "containers", "difficulty": "beginner"},
+            {"type": "mcq", "question": "What is true right after `docker stop web` finishes?", "options": ["It is deleted from disk immediately", "It still exists and can be started again with `docker start web`", "Its image is removed too", "It restarts automatically"], "correct_answer": "It still exists and can be started again with `docker start web`", "competency": "containers", "difficulty": "beginner"},
+            {"type": "mcq", "question": "In `docker run -d --name web -p 8080:80 nginx:1.27`, what does `-d` do?", "options": ["Runs the container in the background (detached)", "Deletes the container when it exits", "Publishes port 8080", "Pins the image by digest"], "correct_answer": "Runs the container in the background (detached)", "competency": "containers", "difficulty": "beginner"},
+        ],
+        "images": [
+            {"type": "mcq", "question": "What does `docker pull nginx` (no tag) actually download?", "options": ["The `nginx:latest` tag — whichever version it points to today", "Every tag in the repository", "Only the smallest layer", "A digest-pinned snapshot"], "correct_answer": "The `nginx:latest` tag — whichever version it points to today", "competency": "images", "difficulty": "beginner"},
+            {"type": "mcq", "question": "Why can `docker rmi nginx:1.27` fail even when the command is typed correctly?", "options": ["A container — even a stopped one — still uses that image", "Images can never be removed", "`rmi` only works on dangling images", "Docker must be stopped first"], "correct_answer": "A container — even a stopped one — still uses that image", "competency": "images", "difficulty": "beginner"},
+            {"type": "mcq", "question": "Two images stored locally share most of their layers. What does that mean for disk space?", "options": ["The shared layers are stored once, not duplicated per image", "Each image keeps a full private copy", "The layers are compressed twice", "Docker deletes the older image automatically"], "correct_answer": "The shared layers are stored once, not duplicated per image", "competency": "images", "difficulty": "beginner"},
+        ],
     }
     if skill_key in PYTHON_FUNCTIONS["skill_aliases"]:
         out = []

@@ -53,12 +53,13 @@ def test_docker_diagnostic_covers_all_blueprint_topics_and_path_is_prerequisite_
     docker = models.get_skill_by_name("Docker")
     generated, path = _make_path(client, student_id, headers, docker)
 
-    # Fallback diagnostic covers multiple blueprint topics (capped at 9 questions)
-    assert 7 <= len(generated["questions"]) <= 9
+    # Docker diagnostic now covers all 11 blueprint topics (capped at 15 questions
+    # so every competency gets at least one probe).
+    assert 11 <= len(generated["questions"]) <= 15
     expected_topics = {
         "containers", "images", "basic_commands", "dockerfile",
         "ports", "volumes", "networking", "compose",
-        "multi_stage_builds", "security_&_secrets", "orchestration_basics"
+        "multi-stage_builds", "security_&_secrets", "orchestration_basics"
     }
     actual_topics = {q["competency"] for q in generated["questions"]}
     assert actual_topics.issubset(expected_topics)
@@ -142,11 +143,11 @@ def test_docker_diagnostic_tagging_covers_blueprint_topics(
     expected_topics = {
         "containers", "images", "basic_commands", "dockerfile",
         "ports", "volumes", "networking", "compose",
-        "multi_stage_builds", "security_&_secrets", "orchestration_basics"
+        "multi-stage_builds", "security_&_secrets", "orchestration_basics"
     }
     actual_topics = {q["competency"] for q in generated["questions"]}
     assert actual_topics.issubset(expected_topics)
-    assert 7 <= len(generated["questions"]) <= 9
+    assert 11 <= len(generated["questions"]) <= 15
 
 
 def test_curated_docker_mini_check_grading_threshold(

@@ -6671,7 +6671,7 @@ def _diag_bank_for(skill_name):
     return bank
 
 
-def _diag_fallback(skill_name, competencies, target_role, num_questions):
+def _diag_fallback(skill_name, competencies, target_role, num_questions, max_questions=None):
     """Deterministic diagnostic generation — fully usable with no API key.
 
     Reuses the curated question bank when available (tagging each question with a
@@ -6681,7 +6681,8 @@ def _diag_fallback(skill_name, competencies, target_role, num_questions):
     """
     from . import diagnostics as dx
     comps = list(competencies or [])
-    n = max(dx.DIAGNOSTIC_MIN_QUESTIONS, min(dx.DIAGNOSTIC_MAX_QUESTIONS, int(num_questions or 7)))
+    cap = max_questions if max_questions is not None else dx.DIAGNOSTIC_MAX_QUESTIONS
+    n = max(dx.DIAGNOSTIC_MIN_QUESTIONS, min(cap, int(num_questions or 7)))
     items = []
     bank = _diag_bank_for(skill_name)
 
@@ -6741,34 +6742,21 @@ def _diag_fallback(skill_name, competencies, target_role, num_questions):
     return items[:n]
 
 
-def generate_diagnostic(skill_name, competencies, target_role=None, num_questions=None):
-    """Generate a short topic-level diagnostic for a skill.
+def _try_generate_diagnostic_ai(skill_name, competencies, target_role, max_questions,
+                                strict=False):
+    """Attempt a live-provider diagnostic for the given competencies.
 
-    Returns a list of diagnostic question dicts, each tagged with a machine-readable
-    `competency`. Uses a live GenAI call when a provider key is set, otherwise the
-    deterministic `_diag_fallback`. Never verifies a skill.
+    Returns a list of normalized items or ``None`` if the call fails or does not
+    yield enough questions.  In ``strict`` mode (used for Docker supplementation)
+    questions whose competency is outside the requested set are dropped so they
+    cannot leak coverage onto unrelated topics.  In non-strict mode (legacy
+    behavior for other skills) an off-list competency is reassigned round-robin.
     """
     from . import diagnostics as dx
     comps = list(competencies or [])
-
-    # The curated Python slice has reviewed questions for its two canonical
-    # competencies.  Serve them before considering a provider or the broad
-    # skill-level bank: round-robin tagging would turn a Functions result into
-    # an Error Handling claim (or vice versa).
-    curated = knowledge_base.curated_diagnostic_questions(skill_name, comps)
-    if curated:
-        return [
-            _diag_item(question, question["competency"], index,
-                       difficulty=question.get("difficulty") or "beginner")
-            for index, question in enumerate(curated)
-        ]
-
-    def fallback():
-        return _diag_fallback(skill_name, comps, target_role, num_questions)
-
-    if not genai_enabled():
-        return fallback()
-
+    if not comps:
+        return None
+    valid_slugs = {dx.competency_slug(c) for c in comps}
     system = (
         "You create a SHORT topic-level diagnostic quiz for a student's skill, to "
         "discover which specific competencies inside the skill the student has "
@@ -6784,26 +6772,28 @@ def generate_diagnostic(skill_name, competencies, target_role=None, num_question
         "Return ONLY the JSON array, no prose."
     )
     comp_lines = "\n".join(f"- {dx.competency_slug(c)} ({c})" for c in comps)
+    ask = max(dx.DIAGNOSTIC_MIN_QUESTIONS, min(max_questions, len(comps) * 2))
     user = (f"Skill: {skill_name}\nTarget role: {target_role or 'unspecified'}\nCompetencies:\n"
-            f"{comp_lines or '- core_concepts (core concepts)'}\nGenerate 5-9 questions.")
+            f"{comp_lines}\nGenerate {ask} questions.")
 
     try:
         raw = complete(system, user)
     except Exception:
-        return fallback()
+        return None
 
     parsed = _extract_json(raw)
     if not isinstance(parsed, list) or not parsed:
-        return fallback()
+        return None
 
-    valid_slugs = {dx.competency_slug(c) for c in comps}
     items = []
     idx = 0
-    for q in parsed[:dx.DIAGNOSTIC_MAX_QUESTIONS * 2]:
+    for q in parsed[:max_questions * 2]:
         if not isinstance(q, dict) or not q.get("question"):
             continue
         comp = str(q.get("competency") or "")
         if comp not in valid_slugs:
+            if strict:
+                continue
             comp = (comps[idx % len(comps)] if comps else "core_concepts")
         qtype = "free_text" if q.get("type") == "free_text" else "mcq"
         diff = str(q.get("difficulty") or "beginner")
@@ -6820,11 +6810,119 @@ def generate_diagnostic(skill_name, competencies, target_role=None, num_question
             item = _balance_mc_options(item)
         items.append(item)
         idx += 1
-        if len(items) >= dx.DIAGNOSTIC_MAX_QUESTIONS:
+        if len(items) >= max_questions:
             break
     if len(items) < dx.DIAGNOSTIC_MIN_QUESTIONS:
-        return fallback()
+        return None
     return items
+
+
+def _generate_docker_supplement_diagnostic(skill_name, competencies, curated,
+                                           target_role, num_questions):
+    """Docker-specific SUPPLEMENT diagnostic.
+
+    Curated banks cover the topics that have them (Containers, Images).  The
+    remaining blueprint competencies keep the AI fallback, with deterministic
+    generic probes filling any gaps so all 11 canonical Docker competencies are
+    represented.  Never fabricates readiness; an incomplete diagnostic simply
+    leaves its missing competencies unsatisfied.
+    """
+    from . import diagnostics as dx
+    comps = list(competencies or [])
+
+    # Curated prefix
+    curated_items = []
+    covered = set()
+    if curated:
+        for index, question in enumerate(curated):
+            comp = str(question.get("competency") or "").strip()
+            if not comp and comps:
+                comp = dx.competency_slug(comps[index % len(comps)])
+            item = _diag_item(question, comp, index,
+                              difficulty=question.get("difficulty") or "beginner")
+            curated_items.append(item)
+            covered.add(comp)
+
+    active_comps = [c for c in comps if dx.competency_slug(c) not in covered]
+    needed = len(curated_items) + len(active_comps)
+    effective_max = min(20, max(num_questions or 0, dx.DIAGNOSTIC_MAX_QUESTIONS, needed))
+    active_budget = effective_max - len(curated_items)
+
+    items = list(curated_items)
+    ai_covered = set()
+
+    if genai_enabled() and active_comps and active_budget > 0:
+        ai_items = _try_generate_diagnostic_ai(
+            skill_name, active_comps, target_role, active_budget, strict=True)
+        if ai_items:
+            for it in ai_items:
+                it["id"] = f"d{len(items)}"
+                items.append(it)
+                ai_covered.add(it["competency"])
+
+    # Deterministic coverage for any competency the provider did not probe
+    uncovered = [c for c in active_comps
+                 if dx.competency_slug(c) not in ai_covered]
+    for comp in uncovered:
+        if len(items) >= effective_max:
+            break
+        slug = dx.competency_slug(comp)
+        q = {
+            "type": "free_text",
+            "question": (f"In your own words, what does '{comp}' mean in the context of "
+                         f"{skill_name}, and give a concrete example of applying it?"),
+            "answer": (f"A correct answer defines '{comp}' accurately and gives a concrete, "
+                       f"on-topic example relevant to {skill_name}."),
+        }
+        items.append(_diag_item(q, slug, len(items), difficulty="beginner"))
+
+    # Safety net: if we somehow ended up with too few questions, fall back to the
+    # legacy deterministic path rather than returning a broken diagnostic.
+    if len(items) < dx.DIAGNOSTIC_MIN_QUESTIONS:
+        return _diag_fallback(skill_name, comps, target_role, num_questions)
+
+    return items[:effective_max]
+
+
+def generate_diagnostic(skill_name, competencies, target_role=None, num_questions=None):
+    """Generate a short topic-level diagnostic for a skill.
+
+    Returns a list of diagnostic question dicts, each tagged with a machine-readable
+    `competency`. Uses a live GenAI call when a provider key is set, otherwise the
+    deterministic `_diag_fallback`. Never verifies a skill.
+    """
+    from . import diagnostics as dx
+    comps = list(competencies or [])
+
+    # The curated Python/SQL slices have reviewed questions for their canonical
+    # competencies.  Serve them before considering a provider or the broad
+    # skill-level bank: round-robin tagging would turn a Functions result into
+    # an Error Handling claim (or vice versa).
+    curated = knowledge_base.curated_diagnostic_questions(skill_name, comps)
+    if curated and (skill_name or "").strip().lower() != "docker":
+        return [
+            _diag_item(question, question["competency"], index,
+                       difficulty=question.get("difficulty") or "beginner")
+            for index, question in enumerate(curated)
+        ]
+
+    # Docker uses SUPPLEMENT mode: curated banks for the topics that have them,
+    # AI fallback for the rest, with deterministic gap-filling for honesty.
+    if (skill_name or "").strip().lower() == "docker":
+        return _generate_docker_supplement_diagnostic(
+            skill_name, comps, curated, target_role, num_questions)
+
+    def fallback():
+        return _diag_fallback(skill_name, comps, target_role, num_questions)
+
+    if not genai_enabled():
+        return fallback()
+
+    ai_items = _try_generate_diagnostic_ai(skill_name, comps, target_role,
+                                           dx.DIAGNOSTIC_MAX_QUESTIONS)
+    if ai_items is None:
+        return fallback()
+    return ai_items
 
 
 # ---------------------------------------------------------------- 5. Free-text grading
