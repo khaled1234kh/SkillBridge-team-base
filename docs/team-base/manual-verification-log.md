@@ -81,3 +81,35 @@ declaring anything.
 These are the **only** gates that cannot be proven from a headless shell; backend
 unit (`1586 passed`) and frontend build/tsc/acceptance-contract runs (`29/29`)
 are logged in `docs/team-base/` test reports and in `TEAM_STATUS.md`.
+
+---
+
+## Today's Verification (2026-09-18) — Live Backend on 127.0.0.1:8000 (venv, fresh restart)
+
+### Nova text path — **VERIFIED ✅**
+- `/api/tutor` (normal chat) returns correct mentor responses for EN + AR short prompts.
+- `/api/tutor/tts` correctly returns **503** with upstream status included: `ElevenLabs 402: payment_required` (quota exhausted 10000/10000 chars).
+- `/api/tutor/stt` (Google Speech Recognition) **works** — transcribes audio to text.
+
+### ElevenLabs TTS — **BLOCKED upstream 🔴**
+- Account tier: **free**, characters **10000 / 10000** used.
+- `GET /v1/user` → 200; `/v1/user/subscription` → 402 on TTS synthesis.
+- All four mentor voice IDs (Nova, Axel, Sage, Vex) return **HTTP 402** from ElevenLabs.
+- `/api/tutor/tts` surfaces this as `503: ElevenLabs 402: payment_required` — correct upstream status propagation.
+- No frontend/backend bug — this is an account/key limitation requiring Eslam's working ElevenLabs credentials.
+
+### Backend health — **GREEN ✅**
+- 1586 tests passed (backend pytest full suite).
+- `/api/system/health` → 200.
+- `/api/config/demo-mode` → `tts.available=false`, `api_key_loaded=true`, `tutor_voices_loaded={nova:true,axel:true,sage:true,vex:true}`.
+- 22 voice/TTS tests pass (including 503-with-upstream and connection-error paths).
+
+### Summary
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Nova text (chat) | ✅ VERIFIED | Provider-free identity + NIM path healthy |
+| STT (Brave/Google) | ✅ VERIFIED | Transcription works |
+| ElevenLabs TTS | 🔴 BLOCKED | Quota exhausted (10000/10000); 503 surfaces upstream 402 |
+| /tutor/tts 503 | ✅ CORRECT | Includes upstream status: `ElevenLabs 402: payment_required` |
+
+**Next gate:** Requires Eslam's real ElevenLabs key/voice IDs to unblock TTS and run Gate 1 (Brave Live Voice).

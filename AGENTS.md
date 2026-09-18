@@ -16,7 +16,7 @@
 - `nemotron-voicechat` — **not in the 82-model public catalog and 404s** on this account's endpoint; cannot replace the Live voice multi-hop path. (Separate experiment only; English-only anyway, Arabic stays on the existing pipeline regardless.)
 - Previous alternates for reference: `deepseek-ai/deepseek-v4-flash-0731` 200 but TTFT ~110.8s / total ~152s on resume — over bound; `nvidia/nemotron-3.5-lightning-30b-a3b` (old interactive): served reliably, live 6.2s — superseded by super-120b on TTFT.
 
-**FINAL env config (repo-root `env`, live on the user's 8001 launcher + 8000 probe since this round):**
+**FINAL env config (repo-root `.env`, live on the user's 8001 launcher + 8000 probe since this round):**
 - `NIM_MODEL=nvidia/nemotron-3-super-120b-a12b`
 - `ARTIFACT_MODEL=nvidia/nemotron-3-super-120b-a12b` (same key/base; GLM 5.3 line removed with rationale)
 - `ARTIFACT_TIMEOUT_SECONDS` default 150, bounded 15–300 (kept). Interactive chat/voice untouched by the artifact tier.

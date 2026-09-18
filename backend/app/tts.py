@@ -16,6 +16,7 @@ load_root_env()
 
 ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
 ELEVENLABS_MODEL = os.environ.get("ELEVENLABS_MODEL", "eleven_multilingual_v2")
+ELEVENLABS_BASE_URL = os.environ.get("ELEVENLABS_BASE_URL", "https://api.elevenlabs.io").rstrip("/")
 
 TUTOR_VOICES = {
     "nova": os.environ.get("ELEVENLABS_NOVA_VOICE_ID", ""),
@@ -106,7 +107,7 @@ def synthesize(tutor, text):
 
     try:
         resp = httpx.post(
-            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+            f"{ELEVENLABS_BASE_URL}/v1/text-to-speech/{voice_id}",
             headers={
                 "xi-api-key": ELEVENLABS_API_KEY,
                 "Accept": "audio/mpeg",
@@ -123,7 +124,29 @@ def synthesize(tutor, text):
     except httpx.HTTPError as exc:
         raise RuntimeError(f"ElevenLabs request failed: {exc.__class__.__name__}") from exc
     if resp.status_code != 200:
-        raise RuntimeError(f"ElevenLabs returned {resp.status_code}")
+        # Surface the upstream provider status and reason (e.g. "ElevenLabs 402:
+        # payment_required") so /tutor/tts 503s carry a useful diagnostic instead
+        # of a bare code. The message is attacker-irrelevant (my own backend), so
+        # echoing the provider body's reason is safe here.
+        upstream = ""
+        try:
+            err = resp.json()
+            if isinstance(err, dict):
+                status = err.get("error", {}).get("status_code") if isinstance(
+                    err.get("error"), dict) else err.get("status_code")
+                reason = (err.get("error") or {}).get("type") if isinstance(
+                    err.get("error"), dict) else None
+                if not reason and isinstance(err.get("detail"), str):
+                    reason = err["detail"]
+                status = int(status or resp.status_code)
+                if reason:
+                    upstream = f"{status}: {reason}"
+                else:
+                    upstream = str(status)
+        except Exception:
+            upstream = ""
+        suffix = f" ({upstream})" if upstream else ""
+        raise RuntimeError(f"ElevenLabs returned {resp.status_code}{suffix}")
 
     audio = resp.content
     content_type = (resp.headers.get("content-type") or "").lower()

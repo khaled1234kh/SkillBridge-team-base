@@ -30,7 +30,7 @@ Stack:
 
 ## 2. How to run
 
-Prereqs: Python 3.12, Node.js, and a repo-root `env` file (see section 3).
+Prereqs: Python 3.12, Node.js, and a repo-root `.env` file (see section 3).
 
 Backend - MUST run with CWD=backend:
 
@@ -49,9 +49,9 @@ Frontend - build + serve statically:
 
 Important: uvicorn must run with CWD=backend (the `app` package + skillbridge.db live under backend/), not the repo root.
 
-## 3. env file
+## 3. `.env` file
 
-Create a repo-root `env` file (never commit it - it is in .gitignore):
+Create a repo-root `.env` file (never commit it - it is in .gitignore):
 
     # NVIDIA NIM (GenAI) - required
     NVIDIA_API_KEY=nvapi-...
