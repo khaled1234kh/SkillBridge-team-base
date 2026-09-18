@@ -1148,6 +1148,524 @@ DOCKER_PORTS = {
 }
 
 
+DOCKER_VOLUMES = {
+    "status": "complete",
+    "skill_aliases": ("docker", "docker & containers"),
+    "competency": "Volumes",
+    "objective": "Use Docker volumes to persist data beyond the container lifecycle and share data between containers.",
+    "objectives": [
+        "Explain that files written inside a container's writable layer are lost when the container is removed.",
+        "Create a named volume with `docker volume create`.",
+        "Mount a volume into a container with `docker run -v NAME:PATH`.",
+        "List and inspect volumes with `docker volume ls` and `docker volume inspect`.",
+        "Choose when to use a named volume versus a bind mount.",
+    ],
+    "prerequisites": [],
+    "roadmap_rationale": (
+        "Volumes follows Containers because persistence only matters once you can create and remove "
+        "containers. It prepares the learner for stateful services and multi-container Compose stacks."
+    ),
+    "learn": {
+        "title": "Volumes",
+        "explanation": (
+            "By default, files written inside a container live only as long as the container. A "
+            "**Docker volume** is a managed storage area outside the container filesystem. Data in a "
+            "volume survives `docker rm`, can be mounted into a replacement container, and can even be "
+            "shared by multiple containers at the same time."
+        ),
+        "key_ideas": [
+            "A container's writable layer is deleted when the container is removed; a volume is not.",
+            "`docker volume create mydata` creates a named volume managed by Docker.",
+            "`docker run -v mydata:/app/data ...` mounts the volume at `/app/data` inside the container.",
+            "`docker volume ls` lists volumes; `docker volume inspect mydata` shows where it is mounted and which driver it uses.",
+            "Named volumes are easier to back up and move than bind mounts; bind mounts tie a host path directly to a container path.",
+        ],
+        "key_terms": {
+            "volume": "Managed storage outside a container's filesystem that survives container removal.",
+            "named volume": "A volume created explicitly with a name, such as `mydata`, so it can be reused.",
+            "bind mount": "A mount that maps a specific host path into a container path.",
+            "mount point": "The path inside the container where external storage appears.",
+            "persistent storage": "Storage that keeps its data after the process or container using it stops.",
+        },
+        "job_relevance": (
+            "Databases, caches, user uploads, and log files must outlive the container. Volumes are the "
+            "standard way to keep that data safe across deploys, restarts, and container replacements."
+        ),
+        "real_world_example": (
+            "You upgrade Postgres from 15 to 16. The old container is removed with `docker rm`, but its "
+            "data directory was stored in a named volume called `pgdata`. You start the new Postgres "
+            "container with the same `-v pgdata:/var/lib/postgresql/data` flag, and the database comes "
+            "back online with all tables and rows intact."
+        ),
+        "common_mistake": (
+            "Do not store important data only in the container's writable layer: it is deleted when the "
+            "container is removed. Use a volume (or bind mount) for anything that must survive."
+        ),
+        "worked_example": (
+            "The example creates a named volume, runs a container that writes a file into it, removes "
+            "the container, and proves the data still exists by mounting the same volume in a new container."
+        ),
+        "depth_note": "Canonical intermediate content; it is fixed by the curated knowledge base, not generated for a target role.",
+        "version_note": (
+            "Examples use the modern unified Docker CLI (Docker Engine 23 and later). SkillBridge does not "
+            "execute Docker commands."
+        ),
+        "grounding_sources": [
+            {"title": "Docker volumes", "url": "https://docs.docker.com/engine/storage/volumes/", "source": "Docker documentation"},
+            {"title": "Docker storage overview", "url": "https://docs.docker.com/engine/storage/", "source": "Docker documentation"},
+        ],
+    },
+    "example": {
+        "title": "Persist data with a named volume",
+        "type": "bash",
+        "content": (
+            "# 1) create a named volume\n"
+            "docker volume create mydata\n"
+            "\n"
+            "# 2) run a container that writes to the volume\n"
+            "docker run -d --name writer -v mydata:/app/data busybox:1.36 \"\n"
+            "  sh -c 'echo hello > /app/data/file.txt'\n"
+            "\n"
+            "# 3) remove the writer container\n"
+            "docker rm writer\n"
+            "\n"
+            "# 4) run a new container with the same volume and read the file\n"
+            "docker run --rm -v mydata:/app/data busybox:1.36 cat /app/data/file.txt"
+        ),
+        "explanation": (
+            "The volume outlives the first container. Even after `docker rm writer`, the file written to "
+            "`/app/data` remains in `mydata` and is visible to the second container. Worked example for "
+            "reading — SkillBridge does not run these commands."
+        ),
+    },
+    "practice": {
+        "type": "practical",
+        "title": "Keep a database alive across container restarts",
+        "task": (
+            "Your Postgres container must keep its data even if the container is removed. Write the "
+            "Docker commands to: (1) create a named volume called `pgdata`, (2) run a Postgres 16 "
+            "container named `db` with the volume mounted at `/var/lib/postgresql/data` and a password "
+            "set via `-e POSTGRES_PASSWORD=secret`, (3) confirm the volume is listed and the container "
+            "is running, (4) remove the `db` container, and (5) start a new Postgres 16 container named "
+            "`db2` using the same volume and show that the previous data is still there. For each step, "
+            "add one line stating what output proves it worked. SkillBridge reviews your commands as text "
+            "only — it never executes them."
+        ),
+        "response_type": "command",
+        "competency": "Volumes",
+        "evaluation_note": (
+            "Static text review only: SkillBridge checks for `docker volume create pgdata`, a `docker run` "
+            "command with `-v pgdata:/var/lib/postgresql/data` and `-e POSTGRES_PASSWORD=secret`, "
+            "`docker volume ls` / `docker volume inspect pgdata` or `docker ps` for verification, "
+            "`docker rm db`, and a second `docker run` reusing the same volume. It does not run Docker, "
+            "so the review cannot prove runtime results. A strong answer names the volume and container, "
+            "states the verification output for every step, and explains why the data survives. A weak "
+            "answer omits the volume, forgets the environment variable, or skips verification."
+        ),
+    },
+    "mini_check": {
+        "questions": [
+            {"id": "v1", "type": "mcq", "question": "What happens to data written in a container's writable layer when the container is removed?", "options": ["It is deleted", "It is copied into the image", "It moves to a volume automatically", "It stays forever"], "correct_answer": "It is deleted", "competency": "Volumes", "difficulty": "beginner", "misconception_hint": "The writable layer is part of the container, not a separate persistent store."},
+            {"id": "v2", "type": "mcq", "question": "Which command creates a named Docker volume?", "options": ["docker volume create mydata", "docker create volume mydata", "docker run -v mydata", "docker build -v mydata"], "correct_answer": "docker volume create mydata", "competency": "Volumes", "difficulty": "beginner", "misconception_hint": "The noun comes before the verb in the Docker CLI for this resource."},
+            {"id": "v3", "type": "mcq", "question": "Which flag mounts a named volume `mydata` into a container at `/app/data`?", "options": ["-v mydata:/app/data", "-p mydata:/app/data", "--name mydata:/app/data", "--rm mydata:/app/data"], "correct_answer": "-v mydata:/app/data", "competency": "Volumes", "difficulty": "beginner", "misconception_hint": "The flag for mounting storage is the same one used for bind mounts."},
+        ]
+    },
+    "locales": {
+        "ar": {
+            "learn": {
+                "title": "الـ Volumes في Docker",
+                "explanation": "افتراضيًا، الملفات اللي بتتكتب جوه الحاوية بتعيش لحد ما الحاوية تتشال. الـ **Docker volume** هي مساحة تخزين مُدارة برّا نظام ملفات الحاوية. البيانات في الـ volume بتفوق `docker rm`، وممكن تركّبها في حاوية بديلة، وممكن كمان تشاركها حاويات متعددة في نفس الوقت.",
+                "key_ideas": [
+                    "طبقة الكتابة في الحاوية بتمسح لما الحاوية تتشال؛ الـ volume لأ.",
+                    "`docker volume create mydata` بيعمل volume مسمّى بيديره Docker.",
+                    "`docker run -v mydata:/app/data ...` بيركّب الـ volume على مسار `/app/data` جوه الحاوية.",
+                    "`docker volume ls` بيسرد الـ volumes؛ `docker volume inspect mydata` بيوري فين متركّب والـ driver المستخدم.",
+                    "الـ named volumes أسهل في الـ backup والنقل من الـ bind mounts؛ الـ bind mounts بيربطوا مسار محدد على الـ host مباشرة بالحاوية.",
+                ],
+                "key_terms": {"volume": "تخزين مُدارة برّا نظام ملفات الحاوية وبيفوق إزالتها.", "named volume": "volume اتعمل باسم صريح زي `mydata` عشان يت reused.", "bind mount": "تركيب بيربط مسار محدد على الـ host بمسار جوه الحاوية.", "mount point": "المسار جوه الحاوية اللي بيظهر فيه التخزين الخارجي.", "persistent storage": "تخزين بيحتفظ بالبيانات بعد ما العملية أو الحاوية توقف."},
+                "job_relevance": "قواعد البيانات والـ caches وملفات المستخدمين والـ logs لازم تفوق الحاوية. الـ Volumes هي الطريقة القياسية للحفاظ على البيانات أثناء النشر وإعادة التشغيل واستبدال الحاويات.",
+                "real_world_example": "بتعمل upgrade لـ Postgres من 15 لـ 16. الحاوية القديمة اتشالت بـ `docker rm`، بس مجلد البيانات كان في volume اسمه `pgdata`. بتشغّل حاوية Postgres 16 جديدة بنفس الفلاغ `-v pgdata:/var/lib/postgresql/data`، وقاعدة البيانات ترجع شغالة بكل الجداول والصفوف زي ما هي.",
+                "common_mistake": "ما تخزّنش بيانات مهمة في طبقة الكتابة بتاعة الحاوية بس: هتمسح لما الحاوية تتشال. استخدم volume (أو bind mount) لأي حاجة لازم تفوق.",
+                "worked_example": "المثال بيعمل volume مسمّى، بيشغّل حاوية تكتب ملف فيه، بيمسح الحاوية، وبيثبت إن البيانات لسه موجودة بتركيب نفس الـ volume في حاوية جديدة.",
+                "depth_note": "محتوى متوسط ثابت من قاعدة المعرفة المراجَعة، مش محتوى مولّد حسب الوظيفة.",
+                "version_note": "الأمثلة تستخدم الـ Docker CLI الحديث (Docker Engine 23 وما بعده). SkillBridge ما بينفّذش أوامر Docker.",
+                "grounding_sources": [
+                    {"title": "Docker volumes", "url": "https://docs.docker.com/engine/storage/volumes/", "source": "Docker documentation"},
+                    {"title": "نظرة عامة على تخزين Docker", "url": "https://docs.docker.com/engine/storage/", "source": "Docker documentation"},
+                ],
+            },
+            "example": {
+                "title": "حافظ على البيانات بـ named volume",
+                "type": "bash",
+                "content": "# 1) create a named volume\ndocker volume create mydata\n\n# 2) run a container that writes to the volume\ndocker run -d --name writer -v mydata:/app/data busybox:1.36 \\\n  sh -c 'echo hello > /app/data/file.txt'\n\n# 3) remove the writer container\ndocker rm writer\n\n# 4) run a new container with the same volume and read the file\ndocker run --rm -v mydata:/app/data busybox:1.36 cat /app/data/file.txt",
+                "explanation": "الـ volume بيفوق الحاوية الأولى. حتى بعد `docker rm writer`، الملف اللي اتكتب في `/app/data` لسه موجود في `mydata` وظاهر للحاوية التانية. مثال للقراية — SkillBridge ما بينفّذش الأوامر دي.",
+            },
+            "practice": {
+                "title": "أبقِ قاعدة البيانات شغالة بعد استبدال الحاوية",
+                "task": "حاوية Postgres عندك لازم تحتفظ ببياناتها حتى لو اتشالت. اكتب أوامر Docker عشان: (١) تعمل volume مسمّى `pgdata`، (٢) تشغّل حاوية Postgres 16 اسمها `db` مركّبة الـ volume على `/var/lib/postgresql/data` وكلمة سر محددة بـ `-e POSTGRES_PASSWORD=secret`، (٣) تتأكد إن الـ volume موجود والحاوية شغالة، (٤) تمسح الحاوية `db`، و(٥) تشغّل حاوية Postgres 16 جديدة اسمها `db2` بنفس الـ volume وتوري إن البيانات القديمة لسه موجودة. لكل خطوة ضيف سطر بيقول إيه المخرج اللي بيثبت نجاحها. SkillBridge بيراجع أوامرك كنص بس — مش بينفّذها.",
+                "response_type": "command",
+                "competency": "Volumes",
+                "evaluation_note": "مراجعة نصية ثابتة فقط: SkillBridge بيتأكد من `docker volume create pgdata`، وأمر `docker run` بيستخدم `-v pgdata:/var/lib/postgresql/data` و`-e POSTGRES_PASSWORD=secret`، و`docker volume ls` / `docker volume inspect pgdata` أو `docker ps` للتحقق، و`docker rm db`، وأمر `docker run` تاني بيستخدم نفس الـ volume. مش بيشغّل Docker، فالمراجعة ما بتثبتش نتيجة تشغيل. الإجابة القوية بتسمّي الـ volume والحاوية، وبتقول مخرج التحقق في كل خطوة، وبتشرح ليه البيانات بتفوق. الإجابة الضعيفة بتنسى الـ volume، أو متسيب variable الباسورد، أو تتخطّى التحقق.",
+            },
+            "mini_check": {"questions": [
+                {"id": "v1", "question": "إيه اللي بيحصل للبيانات اللي اتكتبت في طبقة الكتابة بتاعة الحاوية لما الحاوية تتشال؟", "options": ["بتمسح", "بتتنسخ للصورة", "بتروح لـ volume تلقائيًا", "بتفضل للأبد"], "misconception_hint": "طبقة الكتابة جزء من الحاوية، مش تخزين منفصل دائم."},
+                {"id": "v2", "question": "أي أمر بيعمل Docker volume مسمّى؟", "options": ["docker volume create mydata", "docker create volume mydata", "docker run -v mydata", "docker build -v mydata"], "misconception_hint": "في الـ Docker CLI الاسم بيجي بعد الفعل بالنسبة للـ resource ده."},
+                {"id": "v3", "question": "أي فلاغ بيركّب volume اسمه `mydata` جوه الحاوية على `/app/data`؟", "options": ["-v mydata:/app/data", "-p mydata:/app/data", "--name mydata:/app/data", "--rm mydata:/app/data"], "misconception_hint": "نفس الفلاغ بيستخدم للـ bind mounts كمان."},
+            ]},
+        },
+    },
+}
+
+
+DOCKER_NETWORKING = {
+    "status": "complete",
+    "skill_aliases": ("docker", "docker & containers"),
+    "competency": "Networking",
+    "objective": "Connect containers with a user-defined bridge network and use container names as hostnames for service-to-service communication.",
+    "objectives": [
+        "Explain the difference between the default bridge and a user-defined bridge network.",
+        "Create a network with `docker network create`.",
+        "Run containers on the same network with `--network`.",
+        "Use container names as DNS hostnames to reach another container.",
+        "Inspect a network with `docker network inspect`.",
+    ],
+    "prerequisites": [],
+    "roadmap_rationale": (
+        "Networking follows Ports because once a learner can publish a single container's port, the next "
+        "step is making multiple containers talk to each other reliably by name. It is a prerequisite for Compose."
+    ),
+    "learn": {
+        "title": "Networking",
+        "explanation": (
+            "By default, every container gets its own network namespace. Containers on the default bridge "
+            "can reach each other only by IP address, which changes. A **user-defined bridge network** gives "
+            "containers DNS-based names and controlled isolation: containers on the same network can talk by "
+            "name, while unrelated containers stay separated."
+        ),
+        "key_ideas": [
+            "The default bridge network does not provide DNS; containers are reached by IP, which is fragile.",
+            "`docker network create appnet` creates a user-defined bridge network.",
+            "`docker run --network appnet --name web ...` joins a container to that network.",
+            "Containers on the same user-defined network can resolve each other by name, e.g. `web` or `db:5432`.",
+            "`docker network inspect appnet` shows which containers are attached and their IP addresses.",
+        ],
+        "key_terms": {
+            "network namespace": "An isolated network stack (interfaces, routes, firewall rules) for a container.",
+            "bridge network": "A virtual switch inside Docker that connects containers on the same host.",
+            "user-defined network": "A custom bridge network created by the user, with built-in DNS and better isolation.",
+            "DNS resolution": "Looking up a container by its name to find its IP address.",
+            "service discovery": "Finding another service by name rather than by a changing IP address.",
+        },
+        "job_relevance": (
+            "Multi-service applications (web + database + cache) need reliable communication. User-defined "
+            "networks are the standard way to give containers stable names and isolate application stacks."
+        ),
+        "real_world_example": (
+            "An API container needs to reach a Postgres container. If they share a user-defined network called "
+            "`appnet`, the API can connect to `postgres://db:5432/mydb`. When the Postgres container restarts "
+            "and gets a new IP, the name still resolves correctly."
+        ),
+        "common_mistake": (
+            "Do not rely on the default bridge for service-to-service communication: IP addresses change and "
+            "there is no DNS. Create a user-defined network and use container names as hostnames."
+        ),
+        "worked_example": (
+            "The example creates a network, runs a database and a web container on it, and shows how the web "
+            "container reaches the database by name instead of by IP."
+        ),
+        "depth_note": "Canonical intermediate content; it is fixed by the curated knowledge base, not generated for a target role.",
+        "version_note": (
+            "Examples use the modern unified Docker CLI (Docker Engine 23 and later). SkillBridge does not "
+            "execute Docker commands."
+        ),
+        "grounding_sources": [
+            {"title": "Docker networking overview", "url": "https://docs.docker.com/engine/network/", "source": "Docker documentation"},
+            {"title": "Bridge network overview", "url": "https://docs.docker.com/engine/network/drivers/bridge/", "source": "Docker documentation"},
+        ],
+    },
+    "example": {
+        "title": "Connect a web app and a database on the same network",
+        "type": "bash",
+        "content": (
+            "# 1) create a user-defined bridge network\n"
+            "docker network create appnet\n"
+            "\n"
+            "# 2) run a database container on the network\n"
+            "docker run -d --name db --network appnet -e POSTGRES_PASSWORD=secret postgres:16\n"
+            "\n"
+            "# 3) run a web container on the same network, publishing its port\n"
+            "docker run -d --name web --network appnet -p 8080:80 myweb:1.0\n"
+            "\n"
+            "# 4) inspect the network to see attached containers\n"
+            "docker network inspect appnet\n"
+            "\n"
+            "# Inside the web container, the database is reachable at db:5432"
+        ),
+        "explanation": (
+            "Both containers are on `appnet`, so they can resolve each other by name. The web container does "
+            "not need to know the database's IP; it uses `db:5432`. Publishing `-p 8080:80` only exposes the "
+            "web service to the host. Worked example for reading — SkillBridge does not run these commands."
+        ),
+    },
+    "practice": {
+        "type": "practical",
+        "title": "Wire a web container to a database by name",
+        "task": (
+            "You need an API container (`api`) to reach a Postgres database container (`db`) without hardcoding "
+            "an IP address. Write the commands to: (1) create a user-defined bridge network called `appnet`, "
+            "(2) run the `db` container on `appnet` with a password set via environment variable, (3) run the "
+            "`api` container on `appnet` publishing host port 8080 to container port 3000, and (4) show how the "
+            "API would connect to the database using the container name. Also write the `docker network inspect` "
+            "command you would use to verify both containers are attached. SkillBridge reviews your commands as "
+            "text only — it never executes them."
+        ),
+        "response_type": "command",
+        "competency": "Networking",
+        "evaluation_note": (
+            "Static text review only: SkillBridge checks for `docker network create appnet`, two `docker run` "
+            "commands using `--network appnet` with `--name db` and `--name api`, `-e POSTGRES_PASSWORD=...`, "
+            "`-p 8080:3000`, a connection string or hostname using `db` (not an IP), and `docker network inspect appnet`. "
+            "It does not run Docker, so the review cannot prove runtime results. A strong answer explains why a "
+            "user-defined network is better than the default bridge for name resolution. A weak answer uses IP "
+            "addresses, omits `--network`, or confuses port publishing with internal container DNS."
+        ),
+    },
+    "mini_check": {
+        "questions": [
+            {"id": "n1", "type": "mcq", "question": "What is the main advantage of a user-defined bridge network over the default bridge?", "options": ["Containers can resolve each other by name (DNS)", "It makes containers run faster", "It removes the need for port publishing", "It gives containers direct host network access"], "correct_answer": "Containers can resolve each other by name (DNS)", "competency": "Networking", "difficulty": "beginner", "misconception_hint": "The default bridge lacks a feature that makes service-to-service addressing fragile."},
+            {"id": "n2", "type": "mcq", "question": "Which command creates a new Docker network?", "options": ["docker network create appnet", "docker create network appnet", "docker net add appnet", "docker bridge create appnet"], "correct_answer": "docker network create appnet", "competency": "Networking", "difficulty": "beginner", "misconception_hint": "The CLI follows the same resource-verb pattern as volumes and containers."},
+            {"id": "n3", "type": "mcq", "question": "In a user-defined network, how does a web container reach a database container named `db`?", "options": ["Using the hostname `db`", "Using the host's IP address", "By sharing the same writable layer", "Through `docker exec` only"], "correct_answer": "Using the hostname `db`", "competency": "Networking", "difficulty": "beginner", "misconception_hint": "User-defined networks provide DNS resolution for container names."},
+        ]
+    },
+    "locales": {
+        "ar": {
+            "learn": {
+                "title": "الشبكات في Docker",
+                "explanation": "افتراضيًا، كل حاوية ليها namespace شبكة منفصل. الحاويات على الـ bridge الافتراضي ممكن توصل بعضها بس عن طريق IP address، واللي بيتغيّر. الـ **user-defined bridge network** بتدي الحاويات أسماء من خلال DNS وعزل محكوم: الحاويات على نفس الشبكة ممكن تتكلم باسمها، بينما الحاويات غير المرتبطة بتفضل منفصلة.",
+                "key_ideas": [
+                    "الـ default bridge network مفيش فيه DNS؛ الحاويات بتتوصل ببعضها عن طريق IP، وده مش ثابت.",
+                    "`docker network create appnet` بيعمل user-defined bridge network.",
+                    "`docker run --network appnet --name web ...` بيدخل حاوية للشبكة دي.",
+                    "الحاويات على نفس الـ user-defined network ممكن تستخدم أسماء بعضها، مثلًا `web` أو `db:5432`.",
+                    "`docker network inspect appnet` بيوريك الحاويات المرتبطة وعناوين IP بتاعتها.",
+                ],
+                "key_terms": {"network namespace": "stack شبكة معزول (interfaces, routes, firewall rules) للحاوية.", "bridge network": "switch افتراضي جوه Docker بيوصّل الحاويات على نفس الجهاز.", "user-defined network": "شبكة bridge مخصصة بتتعمل بواسطة المستخدم، فيها DNS مدمج وعزل أفضل.", "DNS resolution": "إنك تلاقي الحاوية باسمها بدل ما تدور على IP address.", "service discovery": "إنك تلاقي خدمة تانية باسمها بدل IP متغيّر."},
+                "job_relevance": "التطبيقات متعددة الخدمات (web + database + cache) محتاجة تواصل ثابت. الـ user-defined networks هي الطريقة القياسية لمنح الحاويات أسماء ثابتة وعزل stack التطبيق.",
+                "real_world_example": "حاوية API محتاجة توصل لـ Postgres. لو هما على نفس شبكة اسمها `appnet`، الـ API ممكن يتصل بـ `postgres://db:5432/mydb`. لما حاوية Postgres تتعمل restart وتاخد IP جديد، الاسم لسه بيتحلّل صح.",
+                "common_mistake": "ما تعتمدش على الـ default bridge للتواصل بين الخدمات: عناوين IP بتتغيّر ومفيش DNS. اعمل user-defined network واستخدم أسماء الحاويات كـ hostnames.",
+                "worked_example": "المثال بيعمل شبكة، بيشغّل حاوية قاعدة بيانات وحاوية ويب عليها، وبيوضّح إزاي حاوية الـ web توصل لـ db بالاسم بدل IP.",
+                "depth_note": "محتوى متوسط ثابت من قاعدة المعرفة المراجَعة، مش محتوى مولّد حسب الوظيفة.",
+                "version_note": "الأمثلة تستخدم الـ Docker CLI الحديث (Docker Engine 23 وما بعده). SkillBridge ما بينفّذش أوامر Docker.",
+                "grounding_sources": [
+                    {"title": "نظرة عامة على شبكات Docker", "url": "https://docs.docker.com/engine/network/", "source": "Docker documentation"},
+                    {"title": "نظرة عامة على bridge network", "url": "https://docs.docker.com/engine/network/drivers/bridge/", "source": "Docker documentation"},
+                ],
+            },
+            "example": {
+                "title": "وصّل تطبيق ويب بقاعدة بيانات على نفس الشبكة",
+                "type": "bash",
+                "content": "# 1) create a user-defined bridge network\ndocker network create appnet\n\n# 2) run a database container on the network\ndocker run -d --name db --network appnet -e POSTGRES_PASSWORD=secret postgres:16\n\n# 3) run a web container on the same network, publishing its port\ndocker run -d --name web --network appnet -p 8080:80 myweb:1.0\n\n# 4) inspect the network to see attached containers\ndocker network inspect appnet\n\n# Inside the web container, the database is reachable at db:5432",
+                "explanation": "الاتنين على `appnet`، فممكن يحلّلوا بعض بالاسم. حاوية الـ web مش محتاجة تعرف IP بتاع الـ database؛ بتستخدم `db:5432`. نشر `-p 8080:80` بيكشف خدمة الويب للـ host بس. مثال للقراية — SkillBridge ما بينفّذش الأوامر دي.",
+            },
+            "practice": {
+                "title": "وصّل حاوية API بقاعدة بيانات بالاسم",
+                "task": "محتاج حاوية API (`api`) توصل لـ Postgres (`db`) من غير ما تثبت IP address. اكتب الأوامر عشان: (١) تعمل user-defined bridge network اسمها `appnet`، (٢) تشغّل حاوية `db` على `appnet` مع كلمة سر محددة بـ environment variable، (٣) تشغّل حاوية `api` على `appnet` وتنشر بورت 8080 على الجهاز لبورت 3000 جوهها، و(٤) تورّي إزاي الـ API هيتصل بـ db باستخدام اسم الحاوية. اكتب كمان أمر `docker network inspect appnet` اللي هتستخدمه للتحقق إن الاتنين مرتبطين. SkillBridge بيراجع أوامرك كنص بس — مش بينفّذها.",
+                "response_type": "command",
+                "competency": "Networking",
+                "evaluation_note": "مراجعة نصية ثابتة فقط: SkillBridge بيتأكد من `docker network create appnet`، وأمرين `docker run` بيستخدموا `--network appnet` مع `--name db` و`--name api`، و`-e POSTGRES_PASSWORD=...`، و`-p 8080:3000`، وconnection string أو hostname بيستخدم `db` (مش IP)، و`docker network inspect appnet`. مش بيشغّل Docker، فالمراجعة ما بتثبتش نتيجة تشغيل. الإجابة القوية بتشرح ليه user-defined network أحسن من الـ default bridge للـ name resolution. الإجابة الضعيفة بتستخدم IP addresses، أو تنسى `--network`، أو تخلط بين نشر البورت والـ DNS الداخلي للحاويات.",
+            },
+            "mini_check": {"questions": [
+                {"id": "n1", "question": "إيه أهم ميزة في user-defined bridge network مقارنة بالـ default bridge؟", "options": ["الحاويات ممكن تحلّل بعضها بالاسم (DNS)", "الحاويات بتشتغل أسرع", "بيلغي الحاجة لنشر البورتات", "بيدي الحاويات وصول مباشر لشبكة الـ host"], "misconception_hint": "الـ default bridge ناقصة ميزة بتخلي التواصل بين الخدمات غير ثابت."},
+                {"id": "n2", "question": "أي أمر بيعمل شبكة Docker جديدة؟", "options": ["docker network create appnet", "docker create network appnet", "docker net add appnet", "docker bridge create appnet"], "misconception_hint": "الـ CLI بنفس نمط الـ resource-verb زي الـ volumes والحاويات."},
+                {"id": "n3", "question": "في user-defined network، إزاي حاوية web توصل لحاوية database اسمها `db`؟", "options": ["باستخدام الـ hostname `db`", "باستخدام IP address بتاع الـ host", "بمشاركة نفس طبقة الكتابة", "عن طريق `docker exec` بس"], "misconception_hint": "الـ user-defined networks بتدي DNS resolution لأسماء الحاويات."},
+            ]},
+        },
+    },
+}
+
+
+DOCKER_COMPOSE = {
+    "status": "complete",
+    "skill_aliases": ("docker", "docker & containers"),
+    "competency": "Compose",
+    "objective": "Define and run a multi-container application with a docker-compose.yml file using the modern docker compose plugin syntax.",
+    "objectives": [
+        "Explain when Docker Compose is preferable to many individual `docker run` commands.",
+        "Write a `docker-compose.yml` file with services, images, ports, volumes, and environment variables.",
+        "Start and stop a stack with `docker compose up -d` and `docker compose down`.",
+        "View logs with `docker compose logs`.",
+        "Use the modern `docker compose` plugin syntax instead of the legacy `docker-compose` command.",
+    ],
+    "prerequisites": [],
+    "roadmap_rationale": (
+        "Compose is the capstone Docker topic: it uses containers, images, ports, volumes, and networking "
+        "together in one declarative file. It belongs after the individual building blocks are established."
+    ),
+    "learn": {
+        "title": "Compose",
+        "explanation": (
+            "Docker Compose lets you describe a multi-container application in a single YAML file, "
+            "`docker-compose.yml`. Instead of remembering many `docker run` commands, you declare services, "
+            "their images, ports, volumes, environment variables, and networks, then start the whole stack "
+            "with one command. Modern Docker uses the `docker compose` plugin (a space), not the older "
+            "`docker-compose` binary."
+        ),
+        "key_ideas": [
+            "A `docker-compose.yml` file describes one or more services and their relationships.",
+            "`docker compose up -d` creates networks, volumes, and containers in the right order and starts them in the background.",
+            "`docker compose down` stops and removes containers and networks; add `--volumes` to remove named volumes too.",
+            "`docker compose logs` shows combined logs from all services, or a single service with `docker compose logs web`.",
+            "Each service name becomes a DNS hostname on the Compose-created network, just like a user-defined bridge network.",
+        ],
+        "key_terms": {
+            "compose": "A Docker tool that defines and runs multi-container applications from a YAML file.",
+            "service": "One container definition inside a docker-compose.yml file.",
+            "docker-compose.yml": "The declarative file that describes the application's services, networks, and volumes.",
+            "docker compose": "The modern Docker CLI plugin command (space between words).",
+            "stack": "The collection of containers, networks, and volumes created by a Compose file.",
+        },
+        "job_relevance": (
+            "Most real projects run more than one container. Compose is the standard way to define local "
+            "development environments and small deployments so the whole team starts the same stack with one command."
+        ),
+        "real_world_example": (
+            "A new developer clones the repository and runs `docker compose up -d`. One command starts the "
+            "web service, the API, and the database, all on the same network with the right volumes and "
+            "environment variables. There is no need to copy five separate `docker run` commands from a README."
+        ),
+        "common_mistake": (
+            "Do not use the legacy `docker-compose` command in new workflows. Modern Docker installs provide "
+            "`docker compose` (two words, a CLI plugin) with better integration and consistency."
+        ),
+        "worked_example": (
+            "The example defines a web service and a database service in docker-compose.yml, starts them in "
+            "the background, checks logs, and tears the stack down."
+        ),
+        "depth_note": "Canonical advanced content; it is fixed by the curated knowledge base, not generated for a target role.",
+        "version_note": (
+            "Examples use Compose file format 3.8 and the modern `docker compose` CLI plugin. SkillBridge does "
+            "not execute Docker commands."
+        ),
+        "grounding_sources": [
+            {"title": "Docker Compose overview", "url": "https://docs.docker.com/compose/", "source": "Docker documentation"},
+            {"title": "Compose file reference", "url": "https://docs.docker.com/reference/compose-file/", "source": "Docker documentation"},
+        ],
+    },
+    "example": {
+        "title": "Run a web service and database with Compose",
+        "type": "bash",
+        "content": (
+            "# docker-compose.yml\n"
+            "version: \"3.8\"\n"
+            "services:\n"
+            "  db:\n"
+            "    image: postgres:16\n"
+            "    environment:\n"
+            "      POSTGRES_PASSWORD: secret\n"
+            "    volumes:\n"
+            "      - pgdata:/var/lib/postgresql/data\n"
+            "  web:\n"
+            "    image: myweb:1.0\n"
+            "    ports:\n"
+            "      - \"8080:80\"\n"
+            "    depends_on:\n"
+            "      - db\n"
+            "volumes:\n"
+            "  pgdata:\n"
+            "\n"
+            "# Start the stack in the background\n"
+            "docker compose up -d\n"
+            "\n"
+            "# View logs\n"
+            "docker compose logs\n"
+            "\n"
+            "# Stop and remove containers and networks\n"
+            "docker compose down"
+        ),
+        "explanation": (
+            "The YAML file replaces several `docker run` commands. Compose creates the network and volume, "
+            "starts the database, then starts the web service, and makes `db` reachable by name from `web`. "
+            "Worked example for reading — SkillBridge does not run these commands."
+        ),
+    },
+    "practice": {
+        "type": "practical",
+        "title": "Write a Compose file for a Node.js app and Postgres",
+        "task": (
+            "Write a `docker-compose.yml` file for a small Node.js API (`api`) and a Postgres database (`db`). "
+            "Requirements: (1) Use Compose file version `3.8`, (2) define a `db` service using image `postgres:16` "
+            "with environment variable `POSTGRES_PASSWORD=secret` and a named volume `pgdata` mounted at "
+            "`/var/lib/postgresql/data`, (3) define an `api` service using image `myapi:1.0` that publishes host "
+            "port 8080 to container port 3000 and depends on `db`, (4) declare the `pgdata` volume at the top level, "
+            "(5) write the commands to start the stack in the background and view logs, (6) write the command to "
+            "stop and remove everything including volumes. Use modern `docker compose` syntax (not `docker-compose`). "
+            "SkillBridge reviews your YAML and commands as text only — it never executes them."
+        ),
+        "response_type": "configuration",
+        "competency": "Compose",
+        "evaluation_note": (
+            "Static text review only: SkillBridge checks for `version: \"3.8\"`, two services (`db`, `api`), "
+            "`image`, `environment`, `volumes`, `ports`, and `depends_on`, top-level `volumes:`, `docker compose up -d`, "
+            "`docker compose logs`, and `docker compose down --volumes`, all using the modern `docker compose` form. "
+            "It does not run Docker, so the review cannot prove runtime results. A strong answer keeps the YAML "
+            "indentation consistent and explains why `depends_on` only controls start order, not readiness. A weak "
+            "answer uses the legacy `docker-compose` command, omits the volume declaration, or mixes up host and container ports."
+        ),
+    },
+    "mini_check": {
+        "questions": [
+            {"id": "c1", "type": "mcq", "question": "Which command starts a Compose stack in the background using the modern plugin syntax?", "options": ["docker compose up -d", "docker-compose up -d", "docker compose start", "docker run compose up"], "correct_answer": "docker compose up -d", "competency": "Compose", "difficulty": "beginner", "misconception_hint": "Modern Docker uses a CLI plugin with a space, not the legacy hyphenated binary."},
+            {"id": "c2", "type": "mcq", "question": "In a docker-compose.yml, what does `depends_on` do?", "options": ["Controls service start order only", "Waits until a service is healthy before starting", "Creates a shared volume", "Publishes ports"], "correct_answer": "Controls service start order only", "competency": "Compose", "difficulty": "beginner", "misconception_hint": "It does not guarantee the dependency is ready to accept traffic."},
+            {"id": "c3", "type": "mcq", "question": "How do containers in a Compose project reach each other by name?", "options": ["Compose creates a user-defined network with DNS", "They share the host network", "They must use published host ports", "They use the default bridge with IP addresses"], "correct_answer": "Compose creates a user-defined network with DNS", "competency": "Compose", "difficulty": "beginner", "misconception_hint": "Compose automatically provides the same name-resolution feature as a user-defined bridge network."},
+        ]
+    },
+    "locales": {
+        "ar": {
+            "learn": {
+                "title": "Docker Compose",
+                "explanation": "Docker Compose بيسمح لك توصف تطبيق متعدد الحاويات في ملف YAML واحد، `docker-compose.yml`. بدل ما تفتكر كام أمر `docker run`، بتصرّح بالـ services والصور والبورتات والـ volumes والـ environment variables، وبعدين تشغّل الـ stack كله بأمر واحد. Docker الحديث بيستخدم `docker compose` plugin (مسافة)، مش الـ `docker-compose` binary القديم.",
+                "key_ideas": [
+                    "ملف `docker-compose.yml` بيوصف واحد أو أكتر من services وعلاقتهم ببعض.",
+                    "`docker compose up -d` بيعمل الشبكات والـ volumes والحاويات بالترتيب الصح ويشغّلها في الخلفية.",
+                    "`docker compose down` بيوقف ويمسح الحاويات والشبكات؛ ضيف `--volumes` عشان تمسح الـ named volumes كمان.",
+                    "`docker compose logs` بيوريك الـ logs المجمعة من كل الخدمات، أو خدمة واحدة بـ `docker compose logs web`.",
+                    "كل اسم service بيتحوّل لـ DNS hostname على الشبكة اللي Compose بيعملها، زي user-defined bridge network بالظبط.",
+                ],
+                "key_terms": {"compose": "أداة Docker بتعرف وتشغّل تطبيقات متعددة الحاويات من ملف YAML.", "service": "تعريف حاوية واحدة جوه ملف docker-compose.yml.", "docker-compose.yml": "الملف التصريحي اللي بيوصف services وnetworks وvolumes بتاعة التطبيق.", "docker compose": "أمر الـ Docker CLI plugin الحديث (كلمتين منفصلين).", "stack": "مجموعة الحاويات والشبكات والـ volumes اللي بيعملها ملف Compose."},
+                "job_relevance": "أغلب المشاريع الحقيقية بتشغّل أكتر من حاوية. Compose هو الطريقة القياسية لتعريف بيئات التطوير المحلية والنشرات الصغيرة، عشان الفريق كله يشغّل نفس الـ stack بأمر واحد.",
+                "real_world_example": "مطوّر جديد بيعمل clone للريبو ويشغّل `docker compose up -d`. أمر واحد بيشغّل خدمة الويب، والـ API، وقاعدة البيانات، كلهم على نفس الشبكة مع الـ volumes ومتغيرات البيئة الصح. مفيش حاجة تنسخ خمس أوامر `docker run` من README.",
+                "common_mistake": "ما تستخدمش أمر `docker-compose` القديم في الـ workflows الجديدة. Docker الحديث بيوفر `docker compose` (كلمتين، CLI plugin) بتكامل أفضل واتساق أكتر.",
+                "worked_example": "المثال بيعرّف خدمة web وخدمة database في docker-compose.yml، يشغّلهم في الخلفية، يتحقق من الـ logs، ويمسح الـ stack.",
+                "depth_note": "محتوى متقدم ثابت من قاعدة المعرفة المراجَعة، مش محتوى مولّد حسب الوظيفة.",
+                "version_note": "الأمثلة تستخدم Compose file format 3.8 وmodern `docker compose` CLI plugin. SkillBridge ما بينفّذش أوامر Docker.",
+                "grounding_sources": [
+                    {"title": "نظرة عامة على Docker Compose", "url": "https://docs.docker.com/compose/", "source": "Docker documentation"},
+                    {"title": "مرجع ملف Compose", "url": "https://docs.docker.com/reference/compose-file/", "source": "Docker documentation"},
+                ],
+            },
+            "example": {
+                "title": "شغّل خدمة ويب وقاعدة بيانات بـ Compose",
+                "type": "bash",
+                "content": "# docker-compose.yml\nversion: \"3.8\"\nservices:\n  db:\n    image: postgres:16\n    environment:\n      POSTGRES_PASSWORD: secret\n    volumes:\n      - pgdata:/var/lib/postgresql/data\n  web:\n    image: myweb:1.0\n    ports:\n      - \"8080:80\"\n    depends_on:\n      - db\nvolumes:\n  pgdata:\n\n# Start the stack in the background\ndocker compose up -d\n\n# View logs\ndocker compose logs\n\n# Stop and remove containers and networks\ndocker compose down",
+                "explanation": "ملف YAML بيحلّ محل كام أمر `docker run`. Compose بيعمل الشبكة والـ volume، يشغّل قاعدة البيانات، وبعدين يشغّل خدمة الويب، ويخلي `db` تتوصل بالاسم من `web`. مثال للقراية — SkillBridge ما بينفّذش الأوامر دي.",
+            },
+            "practice": {
+                "title": "اكتب Compose file لتطبيق Node.js وPostgres",
+                "task": "اكتب ملف `docker-compose.yml` لتطبيق Node.js API (`api`) وقاعدة بيانات Postgres (`db`). المتطلبات: (١) استخدم Compose file version `3.8`، (٢) عرّف خدمة `db` بصورة `postgres:16` ومتغير بيئة `POSTGRES_PASSWORD=secret` وnamed volume `pgdata` مركّب على `/var/lib/postgresql/data`، (٣) عرّف خدمة `api` بصورة `myapi:1.0` تنشر بورت 8080 على الجهاز لبورت 3000 جوهها وتعتمد على `db`، (٤) صرّح عن الـ volume `pgdata` على مستوى أعلى، (٥) اكتب الأوامر اللي تشغّل الـ stack في الخلفية وتوري الـ logs، (٦) اكتب الأمر اللي يوقف ويمسح كل حاجة بما فيها الـ volumes. استخدم صيغة `docker compose` الحديثة (مش `docker-compose`). SkillBridge بيراجع الـ YAML والأوامر كنص بس — مش بينفّذهم.",
+                "response_type": "configuration",
+                "competency": "Compose",
+                "evaluation_note": "مراجعة نصية ثابتة فقط: SkillBridge بيتأكد من `version: \"3.8\"`، وخدمتين (`db` و`api`)، و`image` و`environment` و`volumes` و`ports` و`depends_on`، وإعلان `volumes:` على المستوى الأعلى، و`docker compose up -d` و`docker compose logs` و`docker compose down --volumes`، كلهم بصيغة `docker compose` الحديثة. مش بيشغّل Docker، فالمراجعة ما بتثبتش نتيجة تشغيل. الإجابة القوية بتحافظ على مسافات الـ YAML متسقة وبتشرح ليه `depends_on` بيتحكم في ترتيب التشغيل بس مش في الجاهزية. الإجابة الضعيفة بتستخدم أمر `docker-compose` القديم، أو بتنسى إعلان الـ volume، أو بتخلط بين بورت الجهاز والحاوية.",
+            },
+            "mini_check": {"questions": [
+                {"id": "c1", "question": "أي أمر بيشغّل Compose stack في الخلفية باستخدام الـ plugin الحديث؟", "options": ["docker compose up -d", "docker-compose up -d", "docker compose start", "docker run compose up"], "misconception_hint": "Docker الحديث بيستخدم CLI plugin بمسافة، مش الـ binary القديم اللي فيه hyphen."},
+                {"id": "c2", "question": "في docker-compose.yml، إيه اللي بيعمله `depends_on`؟", "options": ["بيتحكم في ترتيب تشغيل الخدمات بس", "بيستنى لحد ما الخدمة تبقى healthy قبل التشغيل", "بينشئ shared volume", "بينشر البورتات"], "misconception_hint": "مش بيضمن إن الـ dependency جاهز يستقبل ترافيك."},
+                {"id": "c3", "question": "إزاي الحاويات في مشروع Compose بتوصل بعضها بالاسم؟", "options": ["Compose بيعمل user-defined network مع DNS", "بيتشاركوا شبكة الـ host", "لازم يستخدموا published host ports", "بيتخدموا default bridge مع IP addresses"], "misconception_hint": "Compose بيوفر تلقائيًا نفس ميزة name resolution اللي في user-defined bridge network."},
+            ]},
+        },
+    },
+}
+
+
 def curated_diagnostic_questions(skill_name, competencies):
     """Return reviewed diagnostic questions for complete curated topics.
 
@@ -1192,6 +1710,16 @@ def curated_diagnostic_questions(skill_name, competencies):
         ],
         "ports": [
             {"type": "mcq", "question": "Which `docker run` flag publishes a container port to the host?", "options": ["-p", "-d", "--name", "--rm"], "correct_answer": "-p", "competency": "ports", "difficulty": "beginner"},
+        ],
+        # Docker Batch 3 — one reviewed diagnostic question per newly complete topic.
+        "volumes": [
+            {"type": "mcq", "question": "What happens to data written in a container's writable layer when the container is removed?", "options": ["It is deleted", "It is copied into the image", "It moves to a volume automatically", "It stays forever"], "correct_answer": "It is deleted", "competency": "volumes", "difficulty": "beginner"},
+        ],
+        "networking": [
+            {"type": "mcq", "question": "What is the main advantage of a user-defined bridge network over the default bridge?", "options": ["Containers can resolve each other by name (DNS)", "It makes containers run faster", "It removes the need for port publishing", "It gives containers direct host network access"], "correct_answer": "Containers can resolve each other by name (DNS)", "competency": "networking", "difficulty": "beginner"},
+        ],
+        "compose": [
+            {"type": "mcq", "question": "Which command starts a Compose stack in the background using the modern plugin syntax?", "options": ["docker compose up -d", "docker-compose up -d", "docker compose start", "docker run compose up"], "correct_answer": "docker compose up -d", "competency": "compose", "difficulty": "beginner"},
         ],
     }
     if skill_key in PYTHON_FUNCTIONS["skill_aliases"]:
@@ -1243,6 +1771,12 @@ def complete_lesson(skill_name, competency):
         return deepcopy(DOCKER_DOCKERFILE)
     if _key(skill_name) in DOCKER_PORTS["skill_aliases"] and _key(competency) in ("ports",):
         return deepcopy(DOCKER_PORTS)
+    if _key(skill_name) in DOCKER_VOLUMES["skill_aliases"] and _key(competency) in ("volumes",):
+        return deepcopy(DOCKER_VOLUMES)
+    if _key(skill_name) in DOCKER_NETWORKING["skill_aliases"] and _key(competency) in ("networking",):
+        return deepcopy(DOCKER_NETWORKING)
+    if _key(skill_name) in DOCKER_COMPOSE["skill_aliases"] and _key(competency) in ("compose",):
+        return deepcopy(DOCKER_COMPOSE)
     return None
 
 
