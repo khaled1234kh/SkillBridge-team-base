@@ -190,28 +190,28 @@ def test_ai_path_carries_grounded_sources_and_self_check(monkeypatch):
         lessons, "_grounding_sources",
         lambda *a, **k: [trusted_source])
     fake_content = {
-        "learn": {"title": "Containers", "explanation": "What containers are and why.",
+        "learn": {"title": "Basic Commands", "explanation": "What basic commands are and why.",
                   "key_ideas": ["i1", "i2"], "key_terms": {"c": "d"},
-                  "job_relevance": "A Junior AI Engineer runs containers for model deploys.",
+                  "job_relevance": "A Junior AI Engineer runs basic commands for container management.",
                   "common_mistake": "Assuming syntax is valid without checking.",
                   "worked_example": "A practice walkthrough for the task to come.",
                   "depth_note": "Weak: starts from fundamentals.",
                   "grounding_sources": [trusted_source,
                                         {"title": "Bad link", "url": "https://nope.example.com",
                                          "source": "Unknown"}]},
-        "example": {"title": "Ex", "type": "code", "content": "docker run --rm app",
+        "example": {"title": "Ex", "type": "code", "content": "docker ps --help",
                     "explanation": "e"},
-        "practice": {"type": "practical", "title": "Deploy containers",
-                     "task": "Deploy a containerized app and verify it runs.",
-                     "response_type": "code", "competency": "containers"},
+        "practice": {"type": "practical", "title": "Run basic commands",
+                     "task": "Run basic docker commands and verify they work.",
+                     "response_type": "command", "competency": "basic_commands"},
         "mini_check": {"questions": [
             {"id": "m1", "type": "mcq", "question": "q?", "options": ["a", "b"],
-             "correct_answer": "a", "competency": "containers", "difficulty": "beginner"}]},
+             "correct_answer": "a", "competency": "basic_commands", "difficulty": "beginner"}]},
     }
     monkeypatch.setattr(genai, "genai_enabled", lambda: True)
     monkeypatch.setattr(genai, "complete", lambda *a, **k: json.dumps(fake_content))
     content = lessons.generate_lesson(
-        skill_name="Docker", competency="containers", action="learn",
+        skill_name="Docker", competency="basic_commands", action="learn",
         target_role="Junior AI Engineer")
     # grounding merge drops the invented URL
     srcs = content["learn"]["grounding_sources"] or []

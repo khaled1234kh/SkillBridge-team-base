@@ -290,6 +290,335 @@ SQL_QUERIES_FILTERING = {
 }
 
 
+DOCKER_CONTAINERS = {
+    "status": "complete",
+    "skill_aliases": ("docker", "docker & containers"),
+    "competency": "Containers",
+    "objective": "Run, inspect, stop, and remove a named container with the modern Docker CLI.",
+    "objectives": [
+        "Explain what a container is: an isolated running instance of an image.",
+        "Start a named background container with `docker run -d --name`.",
+        "Check running and stopped containers with `docker ps` and `docker ps -a`, and read output with `docker logs`.",
+        "Stop a container with `docker stop`, restart it with `docker start`, and remove it with `docker rm`.",
+    ],
+    "prerequisites": [],
+    "roadmap_rationale": (
+        "Containers is the first complete Docker topic because every later Docker topic — images, Dockerfiles, "
+        "ports, volumes, networking, Compose — operates on a running container. Starting here means the "
+        "learner can always answer 'what is running, and why did it stop?' before building anything."
+    ),
+    "learn": {
+        "title": "Containers",
+        "explanation": (
+            "A **container** is a running instance of an **image**: an isolated process with its own filesystem, "
+            "started by the Docker Engine. `docker run` creates and starts one, `-d` runs it in the background "
+            "(detached), and `--name` gives it a stable name every later command can use."
+        ),
+        "key_ideas": [
+            "`docker run -d --name web -p 8080:80 nginx:1.27` starts a background container named `web` from the `nginx:1.27` image and maps host port 8080 to container port 80.",
+            "`docker ps` lists running containers; `docker ps -a` also includes stopped ones.",
+            "`docker logs web` shows a container's output; `docker inspect web` shows its full configuration.",
+            "`docker stop web` stops the container but keeps it (restart with `docker start web`); `docker rm web` removes it and only works once it is stopped (or with `-f`).",
+        ],
+        "key_terms": {
+            "container": "A running, isolated instance of an image managed by the Docker Engine.",
+            "image": "The read-only template a container is started from.",
+            "detached mode": "Running a container in the background with `-d` instead of tying up your terminal.",
+            "container name": "The stable label passed with `--name`, used by logs, stop, start, and rm.",
+        },
+        "job_relevance": (
+            "Deploying, checking, and restarting services in containers is day-to-day work for backend, DevOps, "
+            "and data engineers. 'Is it running, and what did it log?' is the first question in almost every "
+            "container incident."
+        ),
+        "real_world_example": (
+            "A teammate pings you: 'the staging API stopped responding.' You run `docker ps` — the API container "
+            "is not listed, but `docker ps -a` shows it exited 20 minutes ago. You read `docker logs` to find the "
+            "crash reason, fix the cause, then `docker start` the same container (or `docker rm` it and run a "
+            "fresh one). The container lifecycle is how you answer 'what is running and why did it stop?' in minutes."
+        ),
+        "common_mistake": "Do not confuse a container with an image: the image is the template, the container is the running instance. Removing the container does not remove the image, and a stopped container still exists until you run `docker rm`.",
+        "worked_example": "The example starts one background nginx container, checks it, reads its logs, then stops and removes it.",
+        "depth_note": "Canonical beginner content; it is fixed by the curated knowledge base, not generated for a target role.",
+        "version_note": (
+            "Examples use the modern unified Docker CLI (Docker Engine 23 and later; `docker run` is the shorthand "
+            "for `docker container run`). SkillBridge does not execute Docker commands; the outputs described are "
+            "what Docker prints when a command succeeds."
+        ),
+        "grounding_sources": [
+            {"title": "Docker docs: What is a container?", "url": "https://docs.docker.com/get-started/docker-concepts/the-basics/what-is-a-container/", "source": "Docker documentation"},
+            {"title": "docker container run reference", "url": "https://docs.docker.com/reference/cli/docker/container/run/", "source": "Docker documentation"},
+        ],
+    },
+    "example": {
+        "title": "Run, check, and stop a container",
+        "type": "bash",
+        "content": (
+            "# 1) start a background container from a pinned image\n"
+            "docker run -d --name web -p 8080:80 nginx:1.27\n"
+            "\n"
+            "# 2) confirm it is running\n"
+            "docker ps\n"
+            "\n"
+            "# 3) read its output\n"
+            "docker logs web\n"
+            "\n"
+            "# 4) stop it (it still exists, stopped)\n"
+            "docker stop web\n"
+            "\n"
+            "# 5) remove it for good\n"
+            "docker rm web"
+        ),
+        "explanation": (
+            "Each step is one stage of the container lifecycle: `docker run` creates and starts, `docker ps` "
+            "confirms, `docker logs` reads output, `docker stop` stops without deleting, and `docker rm` removes. "
+            "This is a worked example for reading — SkillBridge does not run these commands."
+        ),
+    },
+    "practice": {
+        "type": "practical",
+        "title": "Bring a service container back to life",
+        "task": (
+            "Your team's staging web service runs in a Docker container, and a teammate reports it is down. "
+            "Write the concrete Docker commands you would run to: (1) check whether the container is running "
+            "or stopped, (2) read its recent logs to find why it stopped, (3) start it again if it is stopped, "
+            "and (4) remove it cleanly if you instead need to re-run it fresh from the same image. For each "
+            "command, add one line saying what success looks like (what Docker prints, or how you verify the "
+            "container is healthy again). Finally, explain in one or two sentences how you would debug the "
+            "case where `docker logs` shows the container exits immediately after starting. SkillBridge reviews "
+            "your commands as text only — it never executes them."
+        ),
+        "response_type": "command",
+        "competency": "Containers",
+        "evaluation_note": (
+            "Static text review only: SkillBridge checks for concrete `docker ps` / `docker ps -a`, "
+            "`docker logs`, `docker start`, and `docker rm` usage against a named container, plus a stated "
+            "verification step for each. It does not run Docker, so the review cannot prove runtime results. "
+            "A strong answer names the container, uses the right lifecycle command for each step, states how "
+            "each step is verified, and gives a concrete debugging idea for the immediate-exit case (for "
+            "example: read the logs' error line, check the container's command, or run it once in the "
+            "foreground to see the failure). A weak answer says 'restart Docker' or 'delete and retry' with "
+            "no logs check, no container name, and no verification."
+        ),
+    },
+    "mini_check": {
+        "questions": [
+            {"id": "c1", "type": "mcq", "question": "Which command lists containers that have already stopped?", "options": ["docker ps", "docker ps -a", "docker logs", "docker images"], "correct_answer": "docker ps -a", "competency": "Containers", "difficulty": "beginner", "misconception_hint": "One flag widens the default listing to include exited containers."},
+            {"id": "c2", "type": "mcq", "question": "What is true right after `docker stop web` finishes?", "options": ["It is deleted from disk immediately", "It still exists and can be started again with `docker start web`", "Its image is removed too", "It restarts automatically"], "correct_answer": "It still exists and can be started again with `docker start web`", "competency": "Containers", "difficulty": "beginner", "misconception_hint": "Stopping and removing are separate steps in the container lifecycle."},
+            {"id": "c3", "type": "mcq", "question": "In `docker run -d --name web -p 8080:80 nginx:1.27`, what does `-d` do?", "options": ["Runs the container in the background (detached)", "Deletes the container when it exits", "Publishes port 8080", "Pins the image by digest"], "correct_answer": "Runs the container in the background (detached)", "competency": "Containers", "difficulty": "beginner", "misconception_hint": "The flag changes how the container attaches to your terminal, not its networking."},
+        ]
+    },
+    # Display translations deliberately retain canonical English answer values;
+    # the persisted Mini Check continues to grade the immutable canonical set.
+    "locales": {
+        "ar": {
+            "learn": {
+                "title": "حاويات Docker",
+                "explanation": "**الحاوية** هي نسخة شغالة من **صورة (image)**: عملية معزولة ليها نظام ملفات خاص بيها، بيشغّلها Docker Engine. الأمر `docker run` بيعمل الحاوية ويشغّلها، و`-d` بيخلّيها تشتغل في الخلفية (detached)، و`--name` بيديها اسم ثابت تقدر تستخدمه في كل الأوامر اللي بعد كده.",
+                "key_ideas": [
+                    "`docker run -d --name web -p 8080:80 nginx:1.27` يشغّل حاوية في الخلفية اسمها `web` من صورة `nginx:1.27` وبيوصّل بورت 8080 على جهازك ببورت 80 جوه الحاوية.",
+                    "`docker ps` بيوريك الحاويات اللي شغالة؛ `docker ps -a` بيشمل كمان اللي واقفة.",
+                    "`docker logs web` بيوريك اللي الحاوية طبعت؛ `docker inspect web` بيعرض كل إعداداتها.",
+                    "`docker stop web` بيوقفها بس مش بيحذفها (ترجع تشتغل بـ `docker start web`)؛ `docker rm web` بيحذفها وبيشتغل بس لما تكون واقفة (أو بـ `-f`).",
+                ],
+                "key_terms": {"حاوية": "نسخة شغالة معزولة من صورة، بيتحكم فيها Docker Engine.", "صورة": "القالب اللي الحاوية بتبدأ منه.", "detached": "تشغيل الحاوية في الخلفية بـ `-d` بدل ما تفضل ماسكة الترمينال.", "اسم الحاوية": "الاسم الثابت اللي بتحدده بـ `--name`، بتستخدمه مع logs وstop وstart وrm."},
+                "job_relevance": "تشغيل الخدمات وفحصها وإعادة تشغيلها في حاويات شغل يومي لمهندسي الـ backend والـ DevOps والداتا — «الحاوية شغالة ولا لأ، وطبعت إيه؟» أول سؤال في أغلب مشاكل الحاويات.",
+                "real_world_example": "زميلك بيكتب لك: «الـ API بتاع الـ staging مش بيرد.» تجري `docker ps` — الحاوية مش موجودة في القايمة، بس `docker ps -a` بيقولك انتهت من ٢٠ دقيقة. بتقرا `docker logs` تعرف سبب الوقوف، تصلّح المشكلة، وبعدين يا إما `docker start` لنفس الحاوية يا إما `docker rm` وتشغّل واحدة جديدة. دورة حياة الحاوية هي اللي بتخلّيك تجاوب على «إيه اللي شغال وليه وقف؟» في دقايق.",
+                "common_mistake": "ما تخلطش بين الحاوية والصورة: الصورة هي القالب، والحاوية هي النسخة اللي شغالة. حذف الحاوية مش بيحذف الصورة، والحاوية اللي واقفة لسه موجودة لحد ما تعمل `docker rm`.",
+                "worked_example": "المثال يشغّل حاوية nginx في الخلفية، بيتأكد منها، بيقرا الـ logs، وبعدين بيوقفها ويحذفها.",
+                "depth_note": "محتوى تأسيسي ثابت من قاعدة المعرفة المراجَعة، مش محتوى مولّد حسب الوظيفة.",
+                "version_note": "الأمثلة تستخدم الـ Docker CLI الحديث (Docker Engine 23 وما بعده؛ `docker run` اختصار لـ `docker container run`). SkillBridge ما بينفّذش أوامر Docker؛ المخرجات الموصوفة هي اللي Docker بيطبعها لما الأمر ينجح.",
+            },
+            "example": {
+                "title": "شغّل وافحص ووقّف حاوية",
+                "type": "bash",
+                "content": "# 1) start a background container from a pinned image\ndocker run -d --name web -p 8080:80 nginx:1.27\n\n# 2) confirm it is running\ndocker ps\n\n# 3) read its output\ndocker logs web\n\n# 4) stop it (it still exists, stopped)\ndocker stop web\n\n# 5) remove it for good\ndocker rm web",
+                "explanation": "كل خطوة بتمثل مرحلة في دورة حياة الحاوية: `docker run` ينشئ ويشغّل، `docker ps` يتأكد، `docker logs` يقرا المخرجات، `docker stop` يوقف من غير حذف، و`docker rm` يحذف نهائي. ده مثال للقراية — SkillBridge ما بينفّذش الأوامر دي.",
+            },
+            "practice": {
+                "title": "رجّع حاوية الخدمة للشغل",
+                "task": "خدمة الويب بتاعة فريقكم شغالة في حاوية Docker، وزميلك بلّغ إنها واقفة. اكتب أوامر Docker اللي هتشغّلها عشان: (١) تعرف الحاوية شغالة ولا واقفة، (٢) تقرا الـ logs الأخيرة عشان تعرف ليه وقفت، (٣) تشغّلها تاني لو واقفة، و(٤) تحذفها بنضافة لو قررت تشغّل واحدة جديدة من نفس الصورة. مع كل أمر اكتب سطر يقول النجاح شكله إيه (Docker هيطبع إيه، أو هتتأكد إزاي إن الحاوية رجعت سليمة). وفي الآخر اشرح في سطر أو اتنين هتصلّح إزاي الحالة اللي `docker logs` بيظهر فيها إن الحاوية بتنتهي فورًا بعد ما تشتغل. SkillBridge بيراجع أوامرك كنص بس — مش بينفّذها.",
+                "response_type": "command",
+                "competency": "Containers",
+                "evaluation_note": "مراجعة نصية ثابتة فقط: SkillBridge بيتأكد من استخدام `docker ps` / `docker ps -a` و`docker logs` و`docker start` و`docker rm` مع حاوية باسمها، ومن وجود خطوة تحقق لكل أمر. مش بيشغّل Docker، فالمراجعة ما بتثبتش نتيجة تشغيل. الإجابة القوية بتسمّي الحاوية، وتستخدم أمر دورة الحياة الصح لكل خطوة، وتقول إزاي بتتأكد من كل خطوة، وبتفكرة حقيقية لحالة الخروج الفوري (مثلًا: قرا سطر الخطأ في الـ logs، أو شغّلها مرة في الـ foreground تشوف الفشل بعينك). الإجابة الضعيفة بتقول «أعمل ريستارت لـ Docker» أو «امسحها وحاول تاني» من غير قراية logs ولا اسم حاوية ولا أي تحقق.",
+            },
+            "mini_check": {"questions": [
+                {"id": "c1", "question": "أي أمر بيوريك الحاويات اللي وقفت خلاص؟", "options": ["docker ps", "docker ps -a", "docker logs", "docker images"], "misconception_hint": "فيه فلاغ واحد بيوسّع القايمة الافتراضية عشان تشمل الحاويات اللي انتهت."},
+                {"id": "c2", "question": "إيه اللي بيحصل بعد ما `docker stop web` يخلص؟", "options": ["بتتحذف من على الديسك فورًا", "لسه موجودة وممكن ترجع تشتغل بـ `docker start web`", "صورتها بتتحذف معاها", "بتشتغل تاني لوحدها"], "misconception_hint": "الإيقاف والحذف خطوتين منفصلتين في دورة حياة الحاوية."},
+                {"id": "c3", "question": "في `docker run -d --name web -p 8080:80 nginx:1.27`، `-d` بيعمل إيه؟", "options": ["بيشغّل الحاوية في الخلفية (detached)", "بيحذف الحاوية لما تخلص", "بينشر بورت 8080", "بتثبيت الصورة بالـ digest"], "misconception_hint": "الفلاغ ده بيغيّر إزاي الحاوية بتتوصّل بالترمينال بتاعك، مش الشبكة."},
+            ]},
+        },
+    },
+}
+
+
+DOCKER_IMAGES = {
+    "status": "complete",
+    "skill_aliases": ("docker", "docker & containers"),
+    "competency": "Images",
+    "objective": "Pull a version-pinned image, inspect and list local images, retag one, and remove an unused image.",
+    "objectives": [
+        "Explain what an image is: a read-only, layered template identified by a tag or digest.",
+        "Pull an exact version with `docker pull nginx:1.27` instead of an unpinned `:latest`.",
+        "List local images with `docker images` and inspect one with `docker image inspect`.",
+        "Retag an image with `docker tag` and remove an unused one with `docker rmi`.",
+    ],
+    "prerequisites": [
+        {
+            "competency": "Containers",
+            "relationship": "required foundation",
+            "why": "An image only matters once you can run it: the run/stop lifecycle from Containers is the context for pulling, pinning, and cleaning up images.",
+        },
+    ],
+    "roadmap_rationale": (
+        "Images follows Containers because every container is started from an image: you learn to run one "
+        "before you learn where it comes from, how it is versioned, and how to keep the local store clean. "
+        "Dockerfile, Ports, and Volumes later build on both."
+    ),
+    "learn": {
+        "title": "Images",
+        "explanation": (
+            "An **image** is the read-only template a container starts from: stacked **layers** identified by a "
+            "**tag** such as `nginx:1.27` (or an immutable **digest**). `docker pull` downloads it to your machine "
+            "once; containers then start from that local copy."
+        ),
+        "key_ideas": [
+            "`docker pull nginx:1.27` downloads that exact version; a plain `docker pull nginx` means `:latest`, a moving pointer that can change underneath you.",
+            "`docker images` lists what is stored locally: repository, tag, image ID, and size.",
+            "Layers are shared: pulling `nginx:1.27-bookworm` after `nginx:1.27` reuses the identical layers instead of downloading them again.",
+            "`docker tag` adds another name to an image; `docker rmi` removes an image only when no container (running or stopped) still uses it.",
+        ],
+        "key_terms": {
+            "image": "The read-only, layered template containers are started from.",
+            "tag": "A mutable label such as `1.27` or `latest` pointing at one image version.",
+            "digest": "The immutable `sha256:...` identifier that pins exactly one image.",
+            "layer": "A reusable filesystem step shared between images.",
+        },
+        "job_relevance": (
+            "Every deployment review asks 'which exact image version is running?'. Pinning tags (or digests) and "
+            "knowing what is stored on a server is daily work for anyone who ships services."
+        ),
+        "real_world_example": (
+            "A security audit flags `nginx:latest` on your server — nobody can say which version that pulled. "
+            "You pin instead: `docker pull nginx:1.27`, retag your copy for the company registry with "
+            "`docker tag nginx:1.27 myregistry.local:5000/web:1.27`, remove the stale entry with `docker rmi`, "
+            "and record the image ID in the deployment ticket. At the next audit you answer with one command: "
+            "`docker images`."
+        ),
+        "common_mistake": "Do not rely on `:latest` in anything that must be reproducible: it is a moving pointer, so the same command can pull a different image next month. Pin a version tag (or a digest) instead.",
+        "worked_example": "The example pins a version, verifies what is stored locally, retags it for an internal registry, and removes an old image.",
+        "depth_note": "Canonical beginner content; it is fixed by the curated knowledge base, not generated for a target role.",
+        "version_note": (
+            "Examples use the modern unified Docker CLI (Docker Engine 23 and later; `docker pull` is the shorthand "
+            "for `docker image pull`, and image IDs are content-addressed SHA-256 digests). SkillBridge does not "
+            "execute Docker commands or pull anything."
+        ),
+        "grounding_sources": [
+            {"title": "Docker docs: What is an image?", "url": "https://docs.docker.com/get-started/docker-concepts/the-basics/what-is-an-image/", "source": "Docker documentation"},
+            {"title": "docker image pull reference", "url": "https://docs.docker.com/reference/cli/docker/image/pull/", "source": "Docker documentation"},
+        ],
+    },
+    "example": {
+        "title": "Pull, verify, retag, and clean up an image",
+        "type": "bash",
+        "content": (
+            "# 1) pull an exact version, not :latest\n"
+            "docker pull nginx:1.27\n"
+            "\n"
+            "# 2) confirm it is stored locally\n"
+            "docker images\n"
+            "\n"
+            "# 3) inspect the pinned image (image ID, layers, env)\n"
+            "docker image inspect nginx:1.27\n"
+            "\n"
+            "# 4) retag it for an internal registry\n"
+            "docker tag nginx:1.27 myregistry.local:5000/web:1.27\n"
+            "\n"
+            "# 5) remove an old image no container uses\n"
+            "docker rmi nginx:1.25"
+        ),
+        "explanation": (
+            "`docker pull` downloads the pinned version once; `docker images` proves what is stored locally; "
+            "`docker image inspect` shows the image ID and layers; `docker tag` adds a registry name without "
+            "copying; `docker rmi` frees an unused image. Worked example for reading — SkillBridge does not run "
+            "these commands."
+        ),
+    },
+    "practice": {
+        "type": "practical",
+        "title": "Make a deployment reproducible",
+        "task": (
+            "Your server currently runs `nginx:latest` and nobody can say which version that is — so the next "
+            "deploy is not reproducible. Write the Docker commands you would run to: (1) pull a pinned public "
+            "version of the image, (2) verify exactly what is now stored locally, including its identifier, "
+            "(3) retag that image for a private registry at `myregistry.local:5000`, and (4) clean up the old "
+            "local image safely. For each command, add one line stating what success looks like. Then explain in "
+            "one sentence why `:latest` is the wrong choice here and what you would pin instead — a version tag "
+            "or a digest, and why. SkillBridge reviews your commands as text only — it never executes them."
+        ),
+        "response_type": "command",
+        "competency": "Images",
+        "evaluation_note": (
+            "Static text review only: SkillBridge checks for a pinned `docker pull` (an explicit tag or digest, "
+            "not `:latest`), `docker images` / `docker image inspect` to verify the local copy, a `docker tag` "
+            "naming the private registry, and a `docker rmi` cleanup, plus a stated reason why `:latest` is not "
+            "reproducible. It does not run Docker, so the review cannot prove runtime results. A strong answer "
+            "pins an exact version, states how each step is verified, and explains the tag-versus-digest "
+            "trade-off in one honest sentence. A weak answer pulls `:latest` again, skips verification, or "
+            "removes an image a container still uses."
+        ),
+    },
+    "mini_check": {
+        "questions": [
+            {"id": "i1", "type": "mcq", "question": "What does `docker pull nginx` (no tag) actually download?", "options": ["The `nginx:latest` tag — whichever version it points to today", "Every tag in the repository", "Only the smallest layer", "A digest-pinned snapshot"], "correct_answer": "The `nginx:latest` tag — whichever version it points to today", "competency": "Images", "difficulty": "beginner", "misconception_hint": "Ask yourself whether the name identifies one fixed version or a moving pointer."},
+            {"id": "i2", "type": "mcq", "question": "Why can `docker rmi nginx:1.27` fail even when the command is typed correctly?", "options": ["A container — even a stopped one — still uses that image", "Images can never be removed", "`rmi` only works on dangling images", "Docker must be stopped first"], "correct_answer": "A container — even a stopped one — still uses that image", "competency": "Images", "difficulty": "beginner", "misconception_hint": "Removal is blocked while anything still references the image."},
+            {"id": "i3", "type": "mcq", "question": "Two images stored locally share most of their layers. What does that mean for disk space?", "options": ["The shared layers are stored once, not duplicated per image", "Each image keeps a full private copy", "The layers are compressed twice", "Docker deletes the older image automatically"], "correct_answer": "The shared layers are stored once, not duplicated per image", "competency": "Images", "difficulty": "beginner", "misconception_hint": "Think about how the storage driver reuses identical content."},
+        ]
+    },
+    # Display translations deliberately retain canonical English answer values;
+    # the persisted Mini Check continues to grade the immutable canonical set.
+    "locales": {
+        "ar": {
+            "learn": {
+                "title": "صُوَر Docker",
+                "explanation": "**الصورة (image)** هي القالب اللي الحاوية بتبدأ منه: طبقات (layers) للقراءة بس، ليها **تاج (tag)** زي `nginx:1.27` (أو **digest** ثابت مش بيتغير). `docker pull` بينزّلها على جهازك مرة واحدة، وبعدين الحاويات بتبدأ من النسخة المحلية دي.",
+                "key_ideas": [
+                    "`docker pull nginx:1.27` بينزّل النسخة دي بالظبط؛ أما `docker pull nginx` من غير تاج فمعناه `:latest` — مؤشر متحرك ممكن يتغير من تحتك.",
+                    "`docker images` بيوريك المخزن محليًا: الـ repository والتاج والـ image ID والحجم.",
+                    "الطبقات مشتركة: لو نزّلت `nginx:1.27-bookworm` بعد `nginx:1.27`، هتلاقي الطبقات المتطابقة بتتاستخدم تاني بدل ما تتنزّل من الأول.",
+                    "`docker tag` بيضيف اسم تاني للصورة؛ `docker rmi` بيحذف الصورة بس لما مفيش حاوية (شغالة أو واقفة) لسه بتستخدمها.",
+                ],
+                "key_terms": {"صورة": "القالب الطبقي للقراءة بس اللي الحاويات بتبدأ منه.", "تاج (tag)": "علامة قابلة للتغيير زي `1.27` أو `latest` بتشاور على نسخة من الصورة.", "digest": "المعرّف الثابت `sha256:...` اللي بيحدد صورة واحدة بالظبط.", "طبقة (layer)": "خطوة نظام ملفات قابلة لإعادة الاستخدام بتتشاور بين الصور."},
+                "job_relevance": "أي مراجعة نشر بتسأل «إيه النسخة بالظبط اللي شغالة؟». تثبيت التاجات (أو الـ digests) ومعرفتك إيه المخزّن على السيرفر شغل يومي لأي حد بيشحن خدمات.",
+                "real_world_example": "تدقيق أمني علّم على `nginx:latest` عندكم على السيرفر — ومحدش يعرف يقول النسخة اللي اتنزّلت دي إيه. بتعمل التثبيت بدل كده: `docker pull nginx:1.27`، وبتعمل تاج لنسختك على ريجستري الشركة بـ `docker tag nginx:1.27 myregistry.local:5000/web:1.27`، وبتشيل القديم بـ `docker rmi`، وبتسجّل الـ image ID في تيكت النشر. في التدقيق الجاي بتجاوب بأمر واحد: `docker images`.",
+                "common_mistake": "ما تعتمدش على `:latest` في أي حاجة لازم تتكرر بنفس الشكل: ده مؤشر بيتحرك، يعني نفس الأمر ممكن ينزّل صورة مختلفة الشهر الجاي. ثبّت تاج نسخة (أو digest) بدل كده.",
+                "worked_example": "المثال بيثبّت نسخة، بيتأكد من المخزن المحلي، بيعمل تاج لريجستري داخلي، وبيحذف صورة قديمة.",
+                "depth_note": "محتوى تأسيسي ثابت من قاعدة المعرفة المراجَعة، مش محتوى مولّد حسب الوظيفة.",
+                "version_note": "الأمثلة تستخدم الـ Docker CLI الحديث (Docker Engine 23 وما بعده؛ `docker pull` اختصار لـ `docker image pull`، والـ image IDs عبارة عن digests من نوع SHA-256). SkillBridge ما بينفّذش أوامر Docker وما بينزّلش حاجة.",
+            },
+            "example": {
+                "title": "نزّل واتأكد واعمل تاج ونضّف صورة",
+                "type": "bash",
+                "content": "# 1) pull an exact version, not :latest\ndocker pull nginx:1.27\n\n# 2) confirm it is stored locally\ndocker images\n\n# 3) inspect the pinned image (image ID, layers, env)\ndocker image inspect nginx:1.27\n\n# 4) retag it for an internal registry\ndocker tag nginx:1.27 myregistry.local:5000/web:1.27\n\n# 5) remove an old image no container uses\ndocker rmi nginx:1.25",
+                "explanation": "`docker pull` بينزّل النسخة المثبتة مرة واحدة؛ `docker images` بيثبت المخزن محليًا؛ `docker image inspect` بيوريك الـ image ID والطبقات؛ `docker tag` بيضيف اسم ريجستري من غير نسخ؛ و`docker rmi` بيحرر صورة مش مستخدمة. مثال للقراية — SkillBridge ما بينفّذش الأوامر دي.",
+            },
+            "practice": {
+                "title": "خلّي النشر قابل للتكرار",
+                "task": "السيرفر عندكم شغال بـ `nginx:latest` ومحدش يعرف النسخة دي إيه — يعني النشر الجاي مش قابل للتكرار. اكتب أوامر Docker اللي هتشغّلها عشان: (١) تنزّل نسخة مثبتة من الصورة، (٢) تتأكد بالظبط إيه المخزّن محليًا دلوقتي بمعرّفه، (٣) تعمل تاج للصورة دي على ريجستري خاص عند `myregistry.local:5000`، و(٤) تنضّف الصورة القديمة المحلية بأمان. مع كل أمر اكتب سطر يقول النجاح شكله إيه. وبعدين اشرح في جملة ليه `:latest` اختيار غلط هنا، وهتثبّت إيه بداله — تاج نسخة ولا digest — وليه. SkillBridge بيراجع أوامرك كنص بس — مش بينفّذها.",
+                "response_type": "command",
+                "competency": "Images",
+                "evaluation_note": "مراجعة نصية ثابتة فقط: SkillBridge بيتأكد من `docker pull` بتاج أو digest مثبت (مش `:latest`)، ومن `docker images` / `docker image inspect` للتحقق من النسخة المحلية، ومن `docker tag` بيسمّي الريجستري الخاص، ومن تنظيف بـ `docker rmi`، ومن سبب واضح ليه `:latest` مش قابل للتكرار. مش بيشغّل Docker، فالمراجعة ما بتثبتش نتيجة تشغيل. الإجابة القوية بتثبّت نسخة بالظبط، وبتقول إزاي بتتأكد من كل خطوة، وبتشرح الفرق بين التاج والـ digest بجملة صادقة. الإجابة الضعيفة بينزّل `:latest` تاني، أو مبتتحققش من حاجة، أو بتحذف صورة لسه فيه حاوية بتستخدمها.",
+            },
+            "mini_check": {"questions": [
+                {"id": "i1", "question": "`docker pull nginx` (من غير تاج) بينزّل إيه بالظبط؟", "options": ["تاج `nginx:latest` — أي نسخة هو مشاور عليها النهارده", "كل التاجات في المستودع", "أصغر طبقة بس", "نسخة مثبتة بالـ digest"], "misconception_hint": "اسأل نفسك: الاسم ده بيحدد نسخة واحدة ثابتة ولا مؤشر بيتحرك؟"},
+                {"id": "i2", "question": "ليه `docker rmi nginx:1.27` ممكن يفشل حتى لو الأمر مكتوب صح؟", "options": ["فيه حاوية — حتى لو واقفة — لسه بتستخدم الصورة دي", "الصور عمرها ما بتتحذف", "`rmi` بيشتغل على الـ dangling بس", "لازم تقفل Docker الأول"], "misconception_hint": "الحذف بيتمنع طالما فيه حاجة لسه بتشاور على الصورة."},
+                {"id": "i3", "question": "صورتين مخزنين محليًا بيتشاركوا في أغلب الطبقات. معنى ده إيه للمساحة على الديسك؟", "options": ["الطبقات المشتركة بتتخزن مرة واحدة، مش نسخة لكل صورة", "كل صورة بتحتفظ بنسخة كاملة ليها", "الطبقات بتتنضغط مرتين", "Docker بيحذف الصورة الأقدم تلقائيًا"], "misconception_hint": "فكّر إزاي الـ storage driver بيعيد استخدام المحتوى المتطابق."},
+            ]},
+        },
+    },
+}
+
+
 def curated_diagnostic_questions(skill_name, competencies):
     """Return reviewed diagnostic questions for complete curated topics.
 
@@ -309,9 +638,20 @@ def curated_diagnostic_questions(skill_name, competencies):
             {"type": "mcq", "question": "Which exception can `int(\"eighty\")` raise?", "options": ["ValueError", "KeyError", "ImportError", "No exception"], "correct_answer": "ValueError", "competency": "python_error_handling", "difficulty": "beginner"},
             {"type": "mcq", "question": "Where should `int(text)` go when it may fail because the text is not numeric?", "options": ["Inside `try`", "Only inside `except ValueError`", "After `return None`", "Inside a bare `except`"], "correct_answer": "Inside `try`", "competency": "python_error_handling", "difficulty": "beginner"},
             {"type": "mcq", "question": "Why catch `ValueError` rather than using bare `except:` in `parse_score`?", "options": ["It handles invalid numeric text without hiding unrelated bugs", "It converts every string", "It avoids using return", "It executes faster"], "correct_answer": "It handles invalid numeric text without hiding unrelated bugs", "competency": "python_error_handling", "difficulty": "beginner"},
-        ],
+],
+        # Note: Docker containers/images diagnostic banks temporarily removed to
+        # restore full 11-topic diagnostic coverage via fallback path.
+        # Curated lesson content (DOCKER_CONTAINERS, DOCKER_IMAGES) remains intact.
+        # Re-add when Eslam decides whether curated banks should replace or
+        # supplement fallback diagnostic questions.
     }
     if skill_key in PYTHON_FUNCTIONS["skill_aliases"]:
+        out = []
+        for key, questions in banks.items():
+            if key in requested:
+                out.extend(questions)
+        return deepcopy(out)
+    if skill_key in DOCKER_CONTAINERS["skill_aliases"]:
         out = []
         for key, questions in banks.items():
             if key in requested:
@@ -344,6 +684,10 @@ def complete_lesson(skill_name, competency):
     if _key(skill_name) in SQL_QUERIES_FILTERING["skill_aliases"] and _key(competency) in (
             "queries & filtering", "sql queries & filtering", "sql queries filtering"):
         return deepcopy(SQL_QUERIES_FILTERING)
+    if _key(skill_name) in DOCKER_CONTAINERS["skill_aliases"] and _key(competency) in ("containers", "docker containers"):
+        return deepcopy(DOCKER_CONTAINERS)
+    if _key(skill_name) in DOCKER_IMAGES["skill_aliases"] and _key(competency) in ("images", "docker images"):
+        return deepcopy(DOCKER_IMAGES)
     return None
 
 

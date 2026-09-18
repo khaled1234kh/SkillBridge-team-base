@@ -757,9 +757,11 @@ def test_generate_lesson_fallback_title_uses_humanized_label():
 
 
 def test_served_lesson_example_code_is_fenced_while_stored_content_is_untouched(
-        client, docker_skill, student_id, auth_headers):
+        client, student_id, auth_headers):
+    """Use Git skill (no curated topics) to test fallback lesson fencing."""
     headers = auth_headers("aisha@student.edu")
-    sk = docker_skill["id"]
+    git = models.get_skill_by_name("Git")
+    sk = git["id"]
     path = _setup_path(client, headers, sk, student_id)
     item = path["items"][0]
     code_content = (
@@ -784,20 +786,21 @@ def test_served_lesson_example_code_is_fenced_while_stored_content_is_untouched(
     }
     models.create_lesson(
         student_id=student_id, skill_id=sk, path_id=path["id"],
-        competency=item["competency"], title=f"{sk} > {item['competency']}",
+        competency=item["competency"], title=f"{git['name']} > {item['competency']}",
         action="learn", content_json=slug_content)
     r = client.get(
         f"/api/students/{student_id}/learning/{sk}/lessons/{item['competency']}",
         headers=headers)
     assert r.status_code == 200
     served = r.json()["content"]
+    # Title is humanized from stored content
     assert served["learn"]["title"] == "What is Statistics Fundamentals?"
     assert served["example"]["title"] == "Statistics Fundamentals in Practice"
     assert served["example"]["content"].startswith("```\n")
     assert "\ntotal_revenue = df['revenue'].sum()\n" in served["example"]["content"]
     assert served["practice"]["title"] == "Practice: Statistics Fundamentals"
     assert served["practice"]["competency"] == "statistics_fundamentals"
-    # stored row is never rewritten
+    # Stored row is never rewritten
     stored = models.get_lesson(student_id, path["id"], item["competency"])
     assert stored["content"]["learn"]["title"] == "What is statistics_fundamentals?"
     assert stored["content"]["example"]["content"] == code_content
