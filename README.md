@@ -8,7 +8,7 @@
 An AI-assisted career-readiness prototype connecting students, employers, and
 universities through one practical learning-to-opportunity journey.
 
-[Explore the experience](#the-experience) · [See how it works](#how-it-works) · [Run locally](#run-it-locally) · [Demo walkthrough](#five-minute-demo)
+[Explore the experience](#the-experience) · [Demo video](#demo-video) · [See how it works](#how-it-works) · [Run locally](#run-it-locally) · [Demo walkthrough](#five-minute-demo)
 </div>
 
 <p align="center">
@@ -138,6 +138,12 @@ Never commit real keys or databases.
 
 **Data warning:** `npm start -- --reset` deletes the local demo database before
 reseeding it. Back up any data you need first.
+
+## Demo video
+
+Watch the SkillBridge walkthrough on YouTube:
+
+[![SkillBridge demo video](https://img.youtube.com/vi/0Vba5iPt9a4/0.jpg)](https://www.youtube.com/watch?v=0Vba5iPt9a4)
 
 ## Five-minute demo
 
