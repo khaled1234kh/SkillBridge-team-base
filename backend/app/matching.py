@@ -213,6 +213,10 @@ def analyze_student(student_id):
         return None
     analysis = categorize(student, role)
     score = job_match_score(student, role)
+    # Canonical metric layer (Phase 2): one name/formula/value per concept, and
+    # a gap can never coexist with a "requirements met" claim. Imported lazily to
+    # avoid the metrics<->matching import cycle at module load time.
+    from . import metrics
     return {
         "student_id": student_id,
         "role_id": role["id"],
@@ -221,4 +225,8 @@ def analyze_student(student_id):
         "match_score": score,
         "skill_gaps": analysis,
         "gap_count": len([a for a in analysis if a["status"] != "strong"]),
+        "metrics": metrics.bundle(student, role),
+        "metric_definitions": metrics.definitions(),
+        "all_requirements_met": metrics.all_requirements_met(student, role),
+        "missing_requirements": metrics.missing_requirements(student, role),
     }

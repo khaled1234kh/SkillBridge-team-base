@@ -70,7 +70,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import models, matching, genai, integrity, seed, auth as auth_mod, mailer, activity, jobs, career_roadmap, diagnostics, path_builder, lessons, coverage, skill_blueprint, tts, copilot, escoe, practice, recommendations, scenarios, esco_import, role_mapping, match_explain, tutor_memory, learning_orchestrator
+from . import models, matching, metrics, genai, integrity, seed, auth as auth_mod, mailer, activity, jobs, career_roadmap, diagnostics, path_builder, lessons, coverage, skill_blueprint, knowledge_base, learning_orchestrator, tts, copilot, escoe, practice, recommendations, scenarios, esco_import, role_mapping, match_explain, tutor_memory
 from .resources import _CHECK_CACHE, annotate_resources
 from .database import init_db, get_cursor, applied_migrations
 
@@ -87,6 +87,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Agentic roadmap verification wrapper (additive; does not touch existing routes).
+from .routes.agent import router as agent_router
+app.include_router(agent_router)
 
 # ------------------------------------------------------------------ request ids
 # Every request gets a short id so support can correlate a user-facing error with
@@ -192,19 +196,33 @@ def _assessment_difficulty(student, role, skill_id):
 
 @app.on_event("startup")
 def on_startup():
+    import sys
+    import threading
     from .database import DB_PATH
     if not os.path.exists(DB_PATH):
         # seed.seed() creates the schema AND the reference data (universities,
         # roles, catalog, demo accounts) â€” it must run on a truly fresh DB,
         # which means checking BEFORE init_db() ever touches the file.
-        seed.seed()
+        # Pregen is deferred to a background thread: on an ephemeral deploy
+        # disk (Render) it took ~30s and delayed port binding past the deploy
+        # scan window. Learning content is generated on demand too.
+        seed.seed(pregen=False)
     else:
         # Existing databases are only migrated so their new columns appear.
         init_db()
     seed.ensure_catalog_roles()
+    # Backfill the cascading signup country/university reference data even when
+    # the DB file already exists (idempotent — INSERT OR IGNORE).
+    seed.ensure_locations()
     # Phase D: fill canonical metadata for rows created before migration 0003
     # (idempotent; a no-op for fresh databases).
     models.backfill_role_canonical_metadata()
+    # Pre-generate deterministic learning content in the background so the
+    # server binds the port immediately while content fills in asynchronously.
+    # Never under pytest: the suite owns its seeded test DB and a second
+    # thread mutating it would corrupt cross-test isolation.
+    if sys.modules.get("pytest") is None:
+        threading.Thread(target=seed.pregen_learning_for_all, daemon=True).start()
 
 
 # ------------------------------------------------------------------ auth helpers
@@ -678,6 +696,12 @@ def api_list_universities():
     return models.list_universities()
 
 
+@app.get("/healthz")
+def api_healthz():
+    """Host health check — no auth, no DB dependency."""
+    return {"status": "ok"}
+
+
 @app.get("/api/locations")
 def api_list_locations():
     """Countries with their cities (public reference data for the cascading
@@ -701,6 +725,19 @@ def api_create_skill(request: Request, body: dict):
     if existing:
         return existing
     return models.create_skill(name, category)
+
+
+# ------------------------------------------------------------------ metrics
+
+@app.get("/api/metrics/definitions")
+def api_metric_definitions(request: Request):
+    """The canonical score registry: one key/label/formula per displayed metric.
+
+    The frontend reads names and explainers from here (and from each analysis
+    payload) so a metric is never relabelled or recomputed inconsistently.
+    """
+    _current_user(request)
+    return {"metrics": metrics.definitions(), "canonical": list(metrics.CANONICAL_METRICS)}
 
 
 # ------------------------------------------------------------------ companies
@@ -1104,12 +1141,25 @@ def upload_cv(student_id: int, file: UploadFile = File(...), request: Request = 
     # current self-reported profile (the old code clobbered skills on every
     # upload, silently erasing a good profile on a scanned/empty upload).
     if extracted:
-        models.update_student(student_id, cv_filename=file.filename)
+        models.update_student(student_id, cv_filename=file.filename, cv_text=cv_text[:200_000])
         models.replace_self_reported_skills(student_id, extracted)
     student = models.get_student(student_id)
     return {"extracted": extracted, "student": student,
             "genai_provider": "real" if genai.genai_enabled() else "deterministic-fallback",
             "warning": warning, "skills_kept": not extracted}
+
+
+@app.get("/api/students/{student_id}/cv-text")
+def api_student_cv_text(student_id: int, request: Request):
+    """Return the raw extracted CV text for a student ("" if none uploaded).
+
+    Feeds the agentic roadmap validator's personalization checks.
+    """
+    user = _current_user(request)
+    _own_student(user, student_id)
+    student = models.get_student(student_id)
+    cv_text = (student or {}).get("cv_text") or ""
+    return {"cv_text": cv_text}
 
 
 # ------------------------------------------------------------------ artifacts
@@ -1493,6 +1543,9 @@ def api_tutor_chat(student_id: int, request: Request, body: dict):
         body_lang or models.get_tutor_language(student_id) or "auto",
         question,
     )
+    # Phase 4D metadata: the thread remembers the last explicit Live/chat mode
+    # and resolved language so History can surface session type per conversation.
+    models.set_tutor_conversation_meta(student_id, conversation_id, mode=mode, language=language)
     ctx_text = f"{ctx['label']} context:\n{ctx['context']}\nLanguage: {copilot.language_label(language)}"
     # Bounded memory for THIS mentor conversation, built from the pre-turn
     # history so the inbound message is never double-shown.
@@ -1768,6 +1821,95 @@ def api_copilot_onboarding(student_id: int, request: Request, body: dict):
     }
 
 
+@app.get("/api/students/{student_id}/tour/state")
+def api_student_tour_state(student_id: int, request: Request):
+    """Server-side source of truth for the product tour (Phase 4).
+
+    Tells the SPA whether the global welcome tour should auto-show (a
+    never-written student reads ``not_seen`` → the tour runs once for a new
+    account), where each contextual mini-tour stands, and whether the user
+    chose "Don't show again". Replay is a client-side transition to
+    ``active``; auto-show never fires unless the state is ``not_seen``.
+    """
+    user = _current_user(request)
+    _require_roles(user, "Student")
+    _own_student(user, student_id)
+    return models.get_student_tour_state(student_id)
+
+
+@app.put("/api/students/{student_id}/tour/state")
+def api_student_tour_state_update(student_id: int, request: Request, body: dict):
+    """Persist tour transitions (backend is the source of truth).
+
+    Accepts a partial body: ``welcome_state`` (not_seen|active|completed|
+    skipped), ``dont_show_again`` (bool), and/or ``mini_states`` (dict of
+    {page: state} where page ∈ roles|learning|assessments and state ∈
+    not_seen|completed). Validation is strict so a client can never smuggle a
+    bogus page or state; unknown fields are ignored. Returns the fresh full
+    state.
+    """
+    user = _current_user(request)
+    _require_roles(user, "Student")
+    _own_student(user, student_id)
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+    ws = body.get("welcome_state")
+    if ws is not None and ws not in models.TOUR_WELCOME_STATES:
+        raise HTTPException(
+            status_code=400,
+            detail="welcome_state must be one of: not_seen, active, completed, skipped")
+    dsa = body.get("dont_show_again")
+    if dsa is not None and not isinstance(dsa, bool):
+        raise HTTPException(status_code=400, detail="dont_show_again must be a boolean")
+    mini = body.get("mini_states")
+    if mini is not None:
+        if not isinstance(mini, dict):
+            raise HTTPException(status_code=400, detail="mini_states must be a JSON object")
+        for page, st in mini.items():
+            if page not in models.TOUR_PAGES or st not in models.TOUR_MINI_STATES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"invalid mini-tour page/state: {page} -> {st}")
+    return models.set_student_tour_state(student_id, welcome_state=ws,
+                                         dont_show_again=dsa, mini_states=mini)
+
+
+@app.get("/api/students/{student_id}/mentor/ui")
+def api_student_mentor_ui(student_id: int, request: Request):
+    """Server-side mentor-panel visibility preference (Phase 5).
+
+    Tells the SPA whether the student hid the floating mentor panel behind the
+    compact launcher. The panel is localStorage-free by contract, so this row
+    is the source of truth that makes the chosen state survive a refresh. A
+    never-written student reads back ``panel_visible: true`` (unchanged UX).
+    """
+    user = _current_user(request)
+    _require_roles(user, "Student")
+    _own_student(user, student_id)
+    return models.get_mentor_ui_preference(student_id)
+
+
+@app.put("/api/students/{student_id}/mentor/ui")
+def api_student_mentor_ui_update(student_id: int, request: Request, body: dict):
+    """Persist the mentor-panel visibility choice (backend is the truth).
+
+    Accepts ``panel_visible`` (bool) only; unknown fields are ignored and a
+    non-boolean value is rejected so the client can never smuggle a bogus
+    state. Returns the fresh full preference.
+    """
+    user = _current_user(request)
+    _require_roles(user, "Student")
+    _own_student(user, student_id)
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+    pv = body.get("panel_visible")
+    if pv is None:
+        raise HTTPException(status_code=400, detail="panel_visible is required")
+    if not isinstance(pv, bool):
+        raise HTTPException(status_code=400, detail="panel_visible must be a boolean")
+    return models.set_mentor_ui_preference(student_id, pv)
+
+
 @app.post("/api/students/{student_id}/assessments/session")
 def api_start_assessment_session(student_id: int, request: Request, body: dict):
     """Mark a verified final assessment as in progress so the Tutor is locked.
@@ -1934,6 +2076,72 @@ def api_interview_tts(student_id: int, request: Request, body: dict):
                              headers={"Cache-Control": "max-age=3600"})
 
 
+@app.post("/api/students/{student_id}/interview/summary")
+def api_interview_summary(student_id: int, request: Request, body: dict):
+    """Deterministic Phase 4D mock-interview session summary.
+
+    Built ONLY from the stored conversation thread (question/answer exchange)
+    and bounded text stats — no provider call, so it never exposes transcripts
+    and always resolves. The summary is explicitly non-verifying practice
+    feedback and never creates or verifies a skill.
+    """
+    user = _current_user(request)
+    _require_roles(user, "Student")
+    _own_student(user, student_id)
+    conversation_id = body.get("conversation_id")
+    if not conversation_id:
+        raise HTTPException(status_code=400, detail="conversation_id is required")
+    try:
+        conversation_id = int(conversation_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="conversation_id must be an integer")
+    conversation = models.get_tutor_conversation(student_id, conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    tutor_id = conversation["tutor_id"]
+    body_tutor = _validate_tutor_id(body.get("tutor_id"), field="tutor persona")
+    if body_tutor and body_tutor != tutor_id:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    messages = models.list_tutor_messages(student_id, tutor_id=tutor_id, conversation_id=conversation_id)
+    role_messages = [m for m in messages if m.get("role") in ("user", "assistant")]
+    if not any(m.get("content") or "" for m in role_messages):
+        raise HTTPException(status_code=400, detail="No interview messages in this conversation")
+    skill_id = body.get("skill_id")
+    skill_name = None
+    if skill_id:
+        skill = models.get_skill(skill_id)
+        skill_name = skill["name"] if skill else None
+    body_lang = body.get("language")
+    if body_lang is not None:
+        body_lang = copilot.validate_language(body_lang)
+        if body_lang is None:
+            raise HTTPException(status_code=400,
+                                detail="Unknown tutor language (allowed: auto, en, ar)")
+    language = copilot.resolve_language(
+        body_lang or conversation.get("language") or models.get_tutor_language(student_id) or "auto",
+        "",
+    )
+    student = models.get_student(student_id)
+    role = student.get("target_role") if student else None
+    summary = genai.interview_session_summary(
+        role_messages,
+        tutor_id=tutor_id,
+        language=language,
+        skill_name=skill_name,
+        target_role=role["title"] if role else None,
+    )
+    chars = int(sum(len(m.get("content") or "") for m in role_messages) or 0)
+    return {
+        "summary": summary,
+        "language": language,
+        "mode": conversation.get("mode") or "interview",
+        "tutor_id": tutor_id,
+        "conversation_id": conversation_id,
+        "turns": sum(1 for m in role_messages if m.get("role") == "user"),
+        "chars": chars,
+    }
+
+
 @app.post("/api/students/{student_id}/tutor/tts")
 def api_tutor_tts(student_id: int, request: Request, body: dict):
     """Speak any tutor reply aloud using the SAME ElevenLabs TTS pipeline.
@@ -2007,9 +2215,13 @@ def api_tutor_stt(student_id: int, request: Request, body: dict):
     except sr.UnknownValueError:
         text = ""
     except sr.RequestError as exc:
-        raise HTTPException(status_code=503, detail=f"STT service unavailable: {exc}")
+        # The provider exception may contain internal diagnostics — never surface
+        # it to students. Log for operators only.
+        print(f"[stt] upstream request error: {exc}", file=sys.stderr)
+        raise HTTPException(status_code=503, detail="STT service unavailable")
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"STT failed: {exc}")
+        print(f"[stt] unexpected error: {exc}", file=sys.stderr)
+        raise HTTPException(status_code=500, detail="Speech-to-text failed")
     return {"text": text}
 
 
@@ -2510,6 +2722,26 @@ def _diagnostic_questions(diag):
     return json.loads(raw) if isinstance(raw, str) else raw or []
 
 
+def _curated_diagnostic_questions(skill_name, topics):
+    """Reviewed, exactly-tagged diagnostic questions for a curated skill.
+
+    Returns [] for skills the knowledge base has not authored, so the generic
+    generator is used there. Curated questions are never relabelled to another
+    competency merely to reach a target question count.
+    """
+    raw = knowledge_base.curated_diagnostic_questions(skill_name, topics)
+    out = []
+    for i, q in enumerate(raw or []):
+        if not isinstance(q, dict):
+            continue
+        item = dict(q)
+        item.setdefault("id", f"d{i}")
+        item.setdefault("options", [])
+        item.setdefault("difficulty", "beginner")
+        out.append(item)
+    return out
+
+
 @app.post("/api/students/{student_id}/learning/{skill_id}/diagnostic/generate")
 def api_generate_diagnostic(student_id: int, skill_id: int, request: Request, body: dict):
     """Generate a topic-level diagnostic for a (student, skill). Determines which
@@ -2528,9 +2760,13 @@ def api_generate_diagnostic(student_id: int, skill_id: int, request: Request, bo
         num = max(0, min(int(body.get("num_questions") or 0), 20))
     except (TypeError, ValueError):
         num = 0
-    questions = genai.generate_diagnostic(
-        skill["name"], topics, role.get("title") if role else None,
-        num_questions=num or None)
+    curated = _curated_diagnostic_questions(skill["name"], topics)
+    if curated:
+        questions = curated
+    else:
+        questions = genai.generate_diagnostic(
+            skill["name"], topics, role.get("title") if role else None,
+            num_questions=num or None)
     models.delete_unanswered_diagnostics(student_id, skill_id)
     diag = models.create_diagnostic(student_id, skill_id, questions)
     return {"skill": skill, "topics": topics, "questions": questions,
@@ -2597,17 +2833,6 @@ def api_latest_diagnostic(student_id: int, skill_id: int, request: Request):
     return models.public_diagnostic(diag)
 
 
-@app.get("/api/students/{student_id}/learning/{skill_id}/orchestrator/next")
-def api_learning_orchestrator_next(student_id: int, skill_id: int, request: Request):
-    """Observe persisted learning state and return the guarded next agent action."""
-    user = _current_user(request)
-    _own_diagnostic(user, student_id)
-    skill = models.get_skill(skill_id)
-    if not skill:
-        raise HTTPException(status_code=404, detail="Skill not found")
-    return learning_orchestrator.observe_and_decide(student_id, skill)
-
-
 # ---------------------------------------------------------------- personalized learning path
 
 def _path_required_level(student, role, skill_id):
@@ -2632,8 +2857,8 @@ def api_generate_personalized_path(student_id: int, skill_id: int, request: Requ
     if not skill:
         raise HTTPException(status_code=404, detail="Skill not found")
 
-    # An abandoned/newly-open diagnostic must not hide the latest completed
-    # evidence or make its existing path impossible to regenerate.
+    # Key off the latest COMPLETED diagnostic: a newer unanswered diagnostic
+    # must never hide the completed one the existing path was built from.
     diag = models.get_latest_completed_diagnostic(student_id, skill_id)
     if not diag:
         return {"diagnostic_required": True, "path": None}
@@ -2693,24 +2918,35 @@ def api_final_assessment_status(student_id: int, skill_id: int, request: Request
     role = student.get("target_role") or {}
     required_level = _path_required_level(student, role, skill_id)
 
-    diag = models.get_latest_diagnostic(student_id, skill_id)
+    # Key off the latest COMPLETED diagnostic, never a newer unanswered one.
+    diag = models.get_latest_completed_diagnostic(student_id, skill_id)
     diag_ready = False
     topics = []
-    if diag and diag.get("completed_at"):
+    if diag:
         topics = (models.public_diagnostic(diag).get("topic_results") or [])
         diag_ready = True
+    latest_diagnostic_id = diag["id"] if diag else None
 
     path = models.get_personalized_path(student_id, skill_id)
     path_items = []
     path_progress = []
     skipped = []
     path_ready = False
+    path_stale = False
     if path:
-        items = json.loads(path.get("items")) if isinstance(path.get("items"), str) else path.get("items") or []
-        path_items = items
-        path_progress = json.loads(path.get("progress")) if isinstance(path.get("progress"), str) else path.get("progress") or []
-        skipped = json.loads(path.get("skipped_mastered")) if isinstance(path.get("skipped_mastered"), str) else path.get("skipped_mastered") or []
+        # A path belongs to one diagnostic. If a newer completed diagnostic
+        # supersedes it, the stale path must never satisfy requirements on its
+        # own — only the current completed diagnostic evidence counts.
+        path_diagnostic_id = path.get("diagnostic_id")
+        path_stale = (latest_diagnostic_id is not None
+                      and path_diagnostic_id is not None
+                      and path_diagnostic_id != latest_diagnostic_id)
         path_ready = True
+        if not path_stale:
+            items = json.loads(path.get("items")) if isinstance(path.get("items"), str) else path.get("items") or []
+            path_items = items
+            path_progress = json.loads(path.get("progress")) if isinstance(path.get("progress"), str) else path.get("progress") or []
+            skipped = json.loads(path.get("skipped_mastered")) if isinstance(path.get("skipped_mastered"), str) else path.get("skipped_mastered") or []
 
     readiness = coverage.final_assessment_ready(
         skill["name"], required_level, topics, path_items, path_progress, skipped)
@@ -2720,6 +2956,8 @@ def api_final_assessment_status(student_id: int, skill_id: int, request: Request
         "required_level": required_level,
         "diagnostic_completed": diag_ready,
         "path_exists": path_ready,
+        "path_stale": path_stale,
+        "latest_diagnostic_id": latest_diagnostic_id,
         "has_blueprint": skill_blueprint.has_blueprint(skill["name"]),
         "readiness": readiness,
     }
@@ -2783,7 +3021,9 @@ def api_generate_lesson(student_id: int, skill_id: int, competency: str, request
         return _lesson_response(student_id, skill_id, path, path_item, existing)
     skill = models.get_skill(skill_id)
     skill_name = (skill.get("name") if skill else None) or f"Skill {skill_id}"
-    action = body.get("action") or _resolve_lesson_action(path_item)
+    # The mastery band (learn vs review) comes only from the persisted path item;
+    # a request body must never be able to spoof it.
+    action = _resolve_lesson_action(path_item)
     target_role = None
     student_profile = models.get_student(student_id)
     if student_profile:
@@ -2891,21 +3131,28 @@ def api_submit_practice(student_id: int, skill_id: int, competency: str,
     if not skill:
         raise HTTPException(status_code=404, detail="Skill not found")
     student = models.get_student(student_id)
+    canonical_source = ((lesson.get("content") or {}).get("canonical") or {}).get("source")
+    curated = canonical_source == "trusted_cs_knowledge_base"
+
+    # Curated practice is deterministic: an identical resubmission returns the
+    # stored attempt (and its static-check evidence) instead of duplicating it.
+    attempts_all = models.list_practice_attempts(student_id, lesson["id"])
+    if curated:
+        reused_attempt = next(
+            (a for a in attempts_all if str(a.get("answer") or "").strip() == answer), None)
+        if reused_attempt:
+            return {"attempt": reused_attempt, "reused": True,
+                    "attempts_count": len(attempts_all)}
+
     previous_attempts = models.list_practice_attempts(student_id, lesson["id"], limit=3)
     practice_task = _practice_task_for_submission(student_id, lesson, body)
-    static_check = practice.python_functions_static_check(lesson, answer)
-    if static_check is None:
-        static_check = practice.python_error_handling_static_check(lesson, answer)
-    if static_check is None:
-        static_check = practice.sql_queries_filtering_static_check(lesson, answer)
-    if static_check:
-        practice_task = {**practice_task, "static_check": static_check}
-    cached = models.find_matching_practice_attempt(student_id, lesson["id"], answer, practice_task)
-    if cached:
-        # Exact answer + exact server-resolved task only.  Reusing this result
-        # avoids an unnecessary provider call; a changed answer always reaches
-        # the evaluator below.
-        return {"attempt": cached, "attempts_count": len(previous_attempts), "reused": True}
+    # Curated lessons choose their own non-executing reviewer.  Unknown or
+    # provider-generated lessons deliberately return None and continue through
+    # the normal evaluation path.
+    static_check = practice.evaluate_practice_static_check(lesson, answer)
+    if static_check is not None and (practice_task or {}).get("source") != "remediation":
+        practice_task = dict(practice_task)
+        practice_task["static_check"] = static_check
     context = practice.build_evaluation_context(
         student=student,
         skill=skill,
@@ -2915,10 +3162,14 @@ def api_submit_practice(student_id: int, skill_id: int, competency: str,
         previous_attempts=previous_attempts,
         practice_task=practice_task,
     )
+    context["strict"] = curated
     try:
         result = practice.evaluate_practice(context, answer)
-    except practice.PracticeGraderUnavailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except practice.PracticeGraderUnavailable:
+        raise HTTPException(
+            status_code=503,
+            detail=("Practice review is temporarily unavailable. "
+                    "Please retry in a moment."))
     remediation = practice.generate_remediation(context, result, answer)
     attempt = models.create_practice_attempt(
         student_id=student_id,
@@ -3122,6 +3373,8 @@ def api_submit_mini_check(student_id: int, skill_id: int, competency: str,
     lesson = models.get_lesson(student_id, path["id"], competency)
     if not lesson:
         raise HTTPException(status_code=404, detail="No lesson found. Generate it first.")
+    if lesson.get("state") == "completed":
+        raise HTTPException(status_code=409, detail="Lesson is already completed. Mini Check results cannot be changed.")
     content = lesson.get("content") or {}
     mc_questions = (content.get("mini_check") or {}).get("questions") or []
     answers = body.get("answers") or []
@@ -3139,6 +3392,24 @@ def api_submit_mini_check(student_id: int, skill_id: int, competency: str,
     path_progress = json.loads(prog_raw) if isinstance(prog_raw, str) else (prog_raw or [])
     return {"lesson": _lesson_response(student_id, skill_id, path, path_item, lesson),
             "path_progress": path_progress}
+
+
+# ---------------------------------------------------------------- learning agent
+
+@app.get("/api/students/{student_id}/learning/{skill_id}/orchestrator/next")
+def api_learning_orchestrator_next(student_id: int, skill_id: int, request: Request):
+    """Deterministic Observe -> Decide next action for the active learning path.
+
+    Read-only apart from the idempotent progress sync that follows a real Mini
+    Check pass. It never grades, never invents curriculum, and never verifies a
+    skill; lesson/practice/Mini Check/Final Assessment keep their authorities.
+    """
+    user = _current_user(request)
+    _own_diagnostic(user, student_id)
+    skill = models.get_skill(skill_id)
+    if not skill:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    return learning_orchestrator.observe_and_decide(student_id, skill)
 
 
 # ------------------------------------------------------------------ recent jobs
@@ -3562,6 +3833,11 @@ def _mount_frontend():
 
     @app.get("/{full_path:path}")
     def spa(full_path: str):
+        # Unknown API paths must never fall through to the SPA shell: a client
+        # calling a mistyped or removed endpoint has to get a structured JSON
+        # error, not HTTP 200 index.html.
+        if full_path == "api" or full_path.startswith("api/"):
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
         candidate = (dist / full_path).resolve()
         if full_path and candidate.is_file() and str(candidate).startswith(str(dist.resolve())):
             return FileResponse(str(candidate))

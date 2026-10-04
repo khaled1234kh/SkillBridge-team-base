@@ -13,7 +13,18 @@ import type { TutorLanguage } from './types'
 
 export type VoiceState = 'idle' | 'listening' | 'processing' | 'speaking' | 'interrupted'
 
-export type VoiceErrorKind = 'connection' | 'voice-unavailable' | 'mic'
+/** Live session mode (Phase 4D). Conversation = the accepted normal tutor chat;
+ *  Interview = the same one-engine loop driving `mode:'interview'` / turns on
+ *  /tutor so a spoken mock interview runs inside Live. Switching `mode` only
+ *  changes what the next /tutor turn sends — it NEVER restarts the recognizer,
+ *  cuts a reply, or rebuilds the loop. */
+export type VoiceModeToken = 'chat' | 'interview'
+
+export type VoiceErrorKind =
+  | 'connection'
+  | 'voice-unavailable'
+  | 'mic'
+  | 'tts'
 
 export interface VoiceTranscriptItem {
   id: number
@@ -100,9 +111,20 @@ export interface VoiceSessionAdapters {
    * the explicit Live speech language ('en' | 'ar') the caller should send so
    * the backend replies in the same language. Live Voice has NO Auto mode: the
    * user picks English or Arabic explicitly, and the recognizer locale never
-   * switches on its own.
+   * switches on its own. In Interview mode `opts.mode` and `opts.turn` are sent
+   * through so the backend drives the spoken mock-interview probes.
    */
-  send(text: string, signal: AbortSignal, opts?: { language?: 'en' | 'ar' }): Promise<string>
+  send(text: string, signal: AbortSignal, opts?: {
+    language?: 'en' | 'ar'
+    mode?: VoiceModeToken
+    interviewTurn?: number
+  }): Promise<string>
+  /** Deterministic Phase 4D summary for a finished Live interview session.
+   *  Returns the summary text (never sends transcripts / never verifies). */
+  interviewSummary?(signal: AbortSignal, opts: {
+    language: 'en' | 'ar'
+    conversationId?: number
+  }): Promise<string>
   schedule(cb: () => void, ms: number): number
   cancelSchedule(id: number): void
 }
@@ -145,6 +167,8 @@ export interface VoiceSessionOptions {
   onTranscript(item: VoiceTranscriptItem): void
   onError(kind: VoiceErrorKind, message: string): void
   onAssistantReply?(reply: string): void
+  /** Fires whenever the Live session mode switches (Phase 4D). */
+  onModeChange?(mode: VoiceModeToken): void
   /**
    * Developer diagnostics: structured stage + safe meta (no transcripts, keys or
    * secret values). Fires at every Live-pipeline decision point so a silent
@@ -157,6 +181,12 @@ export interface VoiceSessionOptions {
    * residual VAD/echo from the just-ended utterance. Default 500 ms (0 in test).
    */
   bargeInHoldOffMs?: number
+  /**
+   * Live session mode at construction (Phase 4D). Defaults to 'chat'. Callers
+   * can switch later with `setMode()`; the mode only changes what the next
+   * /tutor turn sends (never restarts the loop or cuts audio).
+   */
+  mode?: VoiceModeToken
 }
 
 const DEFAULT_REPLY_TIMEOUT_MS = 65_000
@@ -218,6 +248,10 @@ private itemId = 1
   private readonly bargeInHoldOffMs: number
   /** Timestamp until which speech-start barge-ins from the interrupt recognizer are ignored. */
   private bargeInHoldOffUntil = 0
+  /** Live session mode (Phase 4D). Only changes what the next /tutor turn sends. */
+  private mode: VoiceModeToken = 'chat'
+  /** 1-based spoken interview turn counter (sent as `interviewTurn` on /tutor). */
+  private interviewTurn = 0
   /** Per-utterance latency clock (Phase 4C.1). Zeroed at each STT final; every
    *  spoken-turn stage traces `elapsedMs` from that moment. Developer trace only
    *  (never shown in the UI, never a secret). */
@@ -238,10 +272,66 @@ private itemId = 1
     this.sessionLang = opts.language === 'ar' ? 'ar' : 'en'
     this.turnLang = this.sessionLang
     this.pendingLang = null
+    this.mode = opts.mode === 'interview' ? 'interview' : 'chat'
+    this.interviewTurn = 0
   }
 
   get error(): string | null {
     return this.currentError
+  }
+
+  /** Live session mode (Phase 4D) — part of the public engine surface. */
+  get sessionMode(): VoiceModeToken {
+    return this.mode
+  }
+
+  /** Switch the Live session mode (Conversation <-> Interview). Safe at ANY
+   *  stage: it only affects what the next /tutor turn sends — the recognizer,
+   *  the in-flight /tutor and any mentor playback keep running untouched. When
+   *  entering Interview mode the spoken turn counter resets so a fresh spoken
+   *  interview starts from probe #1. */
+  setMode(mode: VoiceModeToken): void {
+    const target = mode === 'interview' ? 'interview' : 'chat'
+    if (target === this.mode && target === 'chat') return
+    this.trace('mode.set', { to: target, from: this.mode, turn: this.interviewTurn })
+    if (target === 'interview') this.interviewTurn = 0
+    this.mode = target
+    this.opts.onModeChange?.(target)
+  }
+
+  /**
+   * Finish a Live interview session and fetch its deterministic summary.
+   * Stops the current loop (no mentor reply is pending after), requests the
+   * summary from the adapter and returns it; on failure returns null with the
+   * localized error surfaced exactly like a tutor/TTS failure. Never sends the
+   * transcript to a provider, never verifies a skill.
+   */
+  async finishInterview(): Promise<string | null> {
+    this.voidPending()
+    this.transition('stop')
+    this.disarmResume()
+    if (!this.adapters.interviewSummary) {
+      this.currentError = 'Voice unavailable'
+      this.trace('summary.error', { kind: 'no-adapter' })
+      this.opts.onError('tts', this.currentError)
+      return null
+    }
+    this.trace('summary.sent', { lang: this.turnLang })
+    try {
+      const summary = await this.adapters.interviewSummary(
+        new AbortController().signal,
+        { language: this.turnLang },
+      )
+      this.trace('summary.ok', { chars: summary.length })
+      this.currentError = null
+      return summary
+    } catch (err) {
+      this.trace('summary.error', { kind: 'fetch', status: (err as { status?: number })?.status ?? null })
+      this.currentError = 'Connection lost — try again'
+      this.transition('error')
+      this.opts.onError('connection', this.currentError)
+      return null
+    }
   }
 
   private currentError: string | null = null
@@ -540,12 +630,17 @@ private itemId = 1
    */
   private async reply(userText: string): Promise<void> {
     const session = this.sessionId
+    const intTurn = this.mode === 'interview' ? this.interviewTurn + 1 : undefined
     this.sendAbort = new AbortController()
     this.armTimeout()
-    this.trace('tutor.sent', { lang: this.turnLang, elapsedMs: this.elapsedMs() })
+    this.trace('tutor.sent', { lang: this.turnLang, mode: this.mode, interviewTurn: intTurn ?? null, elapsedMs: this.elapsedMs() })
     let reply: string
     try {
-      reply = await this.adapters.send(userText, this.sendAbort.signal, { language: this.turnLang })
+      reply = await this.adapters.send(userText, this.sendAbort.signal, {
+        language: this.turnLang,
+        mode: this.mode,
+        interviewTurn: intTurn,
+      })
     } catch (err) {
       if (this.sessionId !== session) return
       if (this.sendAbort?.signal.aborted) return
@@ -559,6 +654,7 @@ private itemId = 1
       return
     }
     if (this.sessionId !== session) return
+    if (this.mode === 'interview' && intTurn !== undefined) this.interviewTurn = intTurn
     this.disarmTimeout()
     this.currentError = null
     this.trace('tutor.ok', { chars: reply.length, lang: this.turnLang, elapsedMs: this.elapsedMs() })
@@ -581,7 +677,7 @@ private itemId = 1
       this.transition('stop')
       this.currentError = 'Voice unavailable'
       this.trace('tts.error', { kind: 'no-adapter' })
-      this.opts.onError('voice-unavailable', this.currentError)
+      this.opts.onError('tts', this.currentError)
       return
     }
     this.appendTranscript('assistant', reply)
@@ -597,7 +693,7 @@ private itemId = 1
       this.trace('tts.error', { kind: 'synth', status: (err as { status?: number })?.status ?? null, lang: this.turnLang, elapsedMs: this.elapsedMs() })
       this.transition('stop')
       this.currentError = 'Voice unavailable'
-      this.opts.onError('voice-unavailable', this.currentError)
+      this.opts.onError('tts', this.currentError)
       return
     }
     if (this.sessionId !== session) return
@@ -612,7 +708,7 @@ private itemId = 1
       this.trace('tts.error', { kind: 'play-setup', lang: this.turnLang, elapsedMs: this.elapsedMs() })
       this.transition('stop')
       this.currentError = 'Voice unavailable'
-      this.opts.onError('voice-unavailable', this.currentError)
+      this.opts.onError('tts', this.currentError)
       return
     }
     this.playback = handle

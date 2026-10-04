@@ -80,6 +80,7 @@ function makeHarness(extraOpts = {}) {
   let sendImpl = null
   let synthImpl = null
   let playImpl = null
+  let summaryImpl = null
 
   const adapters = {
     recognition,
@@ -103,6 +104,12 @@ function makeHarness(extraOpts = {}) {
       if (sendImpl) return sendImpl(text, signal, opts)
       return Promise.resolve('Nice to meet you.')
     },
+    interviewSummary(signal, opts) {
+      calls.summary = calls.summary || []
+      calls.summary.push(opts)
+      if (summaryImpl) return summaryImpl(signal, opts)
+      return Promise.resolve('summary:default')
+    },
     schedule: timers.schedule,
     cancelSchedule: timers.cancelSchedule,
   }
@@ -125,6 +132,7 @@ function makeHarness(extraOpts = {}) {
     setSend: (fn) => { sendImpl = fn },
     setSynth: (fn) => { synthImpl = fn },
     setPlay: (fn) => { playImpl = fn },
+    setSummary: (fn) => { summaryImpl = fn },
     fireFinal: (text) => {
       const l = lastListen()
       if (!l || typeof l.onFinal !== 'function') {
@@ -327,7 +335,9 @@ function flush() { return new Promise((r) => setImmediate(r)) }
 }
 
 // ---------------------------------------------------------------------------
-// 7) TTS synth failure -> reply stays in transcript + idle + voice-unavailable.
+// 7) TTS synth failure -> reply stays in transcript + idle + 'tts' error kind
+//    (distinct from 'voice-unavailable', so browser STT is never demoted to the
+//    push-to-talk fallback just because audio couldn't synthesize).
 // ---------------------------------------------------------------------------
 {
   const h = makeHarness()
@@ -338,7 +348,8 @@ function flush() { return new Promise((r) => setImmediate(r)) }
   await flush()
   assert(h.session.state === 'idle', 'synth-fail: -> idle')
   assert(h.events.transcripts.some((t) => t.role === 'assistant' && t.text === 'Nice to meet you.'), 'synth-fail: reply kept in transcript')
-  assert(h.events.errors.some((e) => e.kind === 'voice-unavailable'), 'synth-fail: voice-unavailable error')
+  assert(h.events.errors.some((e) => e.kind === 'tts'), 'synth-fail: tts error (not voice-unavailable)')
+  assert(!h.events.errors.some((e) => e.kind === 'voice-unavailable'), 'synth-fail: STT still fine — no push-to-talk demotion')
 }
 
 // ---------------------------------------------------------------------------
@@ -419,7 +430,7 @@ function flush() { return new Promise((r) => setImmediate(r)) }
 }
 
 // ---------------------------------------------------------------------------
-// 13) No TTS adapter -> reply kept as transcript, idle, voice-unavailable.
+// 13) No TTS adapter -> reply kept as transcript, idle, tts-error kind.
 // ---------------------------------------------------------------------------
 {
   const h2 = makeHarness()
@@ -440,7 +451,7 @@ function flush() { return new Promise((r) => setImmediate(r)) }
   await flush()
   assert(h2.events.transcripts.length === 2, 'no-tts: user + assistant transcript kept')
   assert(noTts.state === 'idle', 'no-tts: -> idle')
-  assert(h2.events.errors.some((e) => e.kind === 'voice-unavailable'), 'no-tts: voice-unavailable error')
+  assert(h2.events.errors.some((e) => e.kind === 'tts'), 'no-tts: tts error (not voice-unavailable)')
 }
 
 // ---------------------------------------------------------------------------
@@ -543,7 +554,7 @@ function flush() { return new Promise((r) => setImmediate(r)) }
   h2.fireFinal('no tts')
   h2.setSynth(() => Promise.reject(new Error('tts down')))
   await flush()
-  assert(h2.events.errors.some((e) => e.kind === 'voice-unavailable'),
+  assert(h2.events.errors.some((e) => e.kind === 'tts'),
     'live-tts: TTS unavailable surfaces the honest error (no fake speaking)')
   assert(h2.session.state === 'idle', 'live-tts: TTS unavailable -> idle')
   assert(h2.timers.pendingCount() === 0, 'live-tts: no resume timer after TTS failure')
@@ -845,9 +856,10 @@ function flush() { return new Promise((r) => setImmediate(r)) }
 
 // ---------------------------------------------------------------------------
 // 15n) TTS ERROR FALLBACK (Phase 4C.1): a failed synthesis must NOT fake
-//      Speaking — it preserves the generated text, surfaces a localized
-//      voice-unavailable error, never plays anything, and the user can simply
-//      speak again (the loop continues).
+//      Speaking — it preserves the generated text, surfaces a distinct
+//      'tts' error (never demoting the session to server-STT push-to-talk),
+//      never plays anything, and the user can simply speak again (the loop
+//      continues on the SAME browser-STT recognizer).
 // ---------------------------------------------------------------------------
 {
   let lastErr = ''
@@ -857,7 +869,9 @@ function flush() { return new Promise((r) => setImmediate(r)) }
   h.fireFinal('can you help me?')
   await flush()
   assert(h.session.state === 'idle', '4c-fallback: TTS failure -> idle, NO fake Speaking')
-  assert(lastErr === 'voice-unavailable', '4c-fallback: voice-unavailable error surfaced')
+  assert(lastErr === 'tts', '4c-fallback: tts error surfaced (distinct from voice-unavailable)')
+  assert(!h.events.errors.some((e) => e.kind === 'voice-unavailable'),
+    '4c-fallback: TTS failure does NOT trigger voice-unavailable fallback mode')
   assert(h.events.transcripts.some((t) => t.role === 'assistant' && t.text === 'Nice to meet you.'),
     '4c-fallback: generated reply text preserved in the transcript')
   assert(h.calls.play.length === 0, '4c-fallback: nothing was played')
@@ -941,6 +955,124 @@ function flush() { return new Promise((r) => setImmediate(r)) }
     '4c-latency: audio-ready -> playback-start delta is traced')
   assert(/console\.info\('\[voice-live\]'/.test(hookSrc),
     '4c-latency: stage traces appear ONLY in the developer console (never the UI)')
+}
+
+// ---------------------------------------------------------------------------
+// 17) Phase 4D — Live INTERVIEW mode on the SAME one-engine loop: the engine
+//     passes mode='interview' + a 1-based turn counter on /tutor, increments
+//     after a successful interview reply, resets the counter when re-entering
+//     interview mode, and finishInterview() stops the loop and fetches the
+//     deterministic summary via the interviewSummary adapter (never the chat
+//     send path). Conversation mode keeps mode='chat' and turn=undefined.
+// ---------------------------------------------------------------------------
+{
+  const h = makeHarness()
+  h.session.setMode('interview')
+  assert(h.session.sessionMode === 'interview', '4d-mode: sessionMode is interview after setMode')
+  const sendOpts = []
+  h.setSend((text, signal, opts) => { sendOpts.push(opts); return text === 'stop' ? 'Summary ready' : `reply-${opts?.interviewTurn}` })
+  h.session.start()
+  h.fireFinal('tell me about docker')
+  await flush()
+  assert(h.calls.send.length === 1, '4d-mode: exactly one /tutor send in interview mode')
+  assert(sendOpts[0].mode === 'interview' && sendOpts[0].interviewTurn === 1,
+    '4d-mode: first interview turn sends mode=interview + turn 1')
+  assert(h.session.sessionMode === 'interview', '4d-mode: mode persists across the turn')
+  // Next spoken turn increments the probe counter.
+  h.session.stop()
+  h.session.start()
+  h.fireFinal('how about volumes?')
+  await flush()
+  assert(h.calls.send.length === 2 && sendOpts[1].interviewTurn === 2,
+    '4d-mode: second interview turn sends turn 2 (1-based counter incremented)')
+  // Switching away to Conversation sends mode=chat with no turn.
+  h.session.setMode('chat')
+  assert(h.session.sessionMode === 'chat', '4d-mode: back to conversation mode')
+  h.session.stop()
+  h.session.start()
+  h.fireFinal('hello there')
+  await flush()
+  const convOpts = h.calls.send[2].opts
+  assert(convOpts.mode === 'chat' && convOpts.interviewTurn === undefined,
+    '4d-mode: conversation turn sends mode=chat with NO interviewTurn')
+  // Re-entering interview resets the turn counter to probe #1.
+  h.session.setMode('interview')
+  h.session.stop()
+  h.session.start()
+  h.fireFinal('fresh probe')
+  await flush()
+  const int2 = h.calls.send.length
+  assert(h.calls.send[int2 - 1].opts.interviewTurn === 1,
+    '4d-mode: re-entering interview resets the turn counter to 1')
+  assert(int2 === 4, '4d-mode: four /tutor sends in total across all switches')
+  h.session.stop()
+}
+{
+  const h = makeHarness()
+  h.setSummary(async (signal, opts) => `summary:${opts.language}`)
+  h.session.setMode('interview')
+  h.session.start()
+  h.fireFinal('question one')
+  await flush()
+  const sendCount = h.calls.send.length
+  assert(sendCount === 1, '4d-summary: one interview turn happened before finish')
+  h.session.stop()
+  const summary = await h.session.finishInterview()
+  assert(summary === 'summary:en', '4d-summary: finishInterview resolves the local-language summary')
+  assert(h.calls.send.length === sendCount, '4d-summary: the summary never hits the /tutor send path')
+  assert(h.calls.summary && h.calls.summary.length === 1 && h.calls.summary[0].language === 'en',
+    '4d-summary: summary adapter called once with the explicit Live language')
+  assert(h.timers.pendingCount() === 0, '4d-summary: no auto-resume armed after the loop stopped')
+  assert(h.session.state === 'idle', '4d-summary: session rests idle after finish')
+  assert(h.events.transcripts.filter((t) => t.role === 'assistant').length >= 1,
+    '4d-summary: the interview answers were transcripted like any Live turn')
+}
+{
+  // No summary adapter configured -> finishInterview returns null and surfaces
+  // an error instead of silently failing.
+  const h = makeHarness()
+  delete h.adapters.interviewSummary
+  h.session.setMode('interview')
+  const summary = await h.session.finishInterview()
+  assert(summary === null, '4d-summary: missing adapter resolves to null')
+}
+
+// ---------------------------------------------------------------------------
+// 18) Phase 4D source pins (read-only): the hook exposes mode/setMode/
+//     finishInterview/interviewSummary, the panel forwards interviewTurn as the
+//     backend turn field, and the engine ModeToken is chat|interview only.
+// ---------------------------------------------------------------------------
+{
+  const engineSrc = readFileSync(resolve(__dirname, '../src/lib/voiceSession.ts'), 'utf8')
+  const hookSrc = readFileSync(resolve(__dirname, '../src/hooks/useVoiceSession.ts'), 'utf8')
+  const panelSrc = readFileSync(resolve(__dirname, '../src/components/CopilotPanel.tsx'), 'utf8')
+  const voiceSrc = readFileSync(resolve(__dirname, '../src/components/VoiceMode.tsx'), 'utf8')
+  assert(/export type VoiceModeToken = 'chat' \| 'interview'/.test(engineSrc),
+    '4d-pins: engine ModeToken is exactly chat|interview (no third surface)')
+  assert(/get sessionMode\(\)/.test(engineSrc) && /setMode\(mode: VoiceModeToken\)/.test(engineSrc),
+    '4d-pins: engine exposes sessionMode + setMode')
+  assert(/private interviewTurn = 0/.test(engineSrc),
+    '4d-pins: engine owns the spoken interview turn counter')
+  assert(/interviewTurn: intTurn/.test(engineSrc),
+    '4d-pins: /tutor send passes the interview turn')
+  assert(/async finishInterview\(\)/.test(engineSrc),
+    '4d-pins: engine exposes finishInterview')
+  assert(/interviewSummary?\(signal: AbortSignal, opts:/.test(engineSrc) || /interviewSummary\?/.test(engineSrc),
+    '4d-pins: engine adapter hook has an optional interviewSummary')
+  assert(/mode: VoiceModeToken/.test(hookSrc) && /setMode\(/.test(hookSrc) && /finishInterview\(/.test(hookSrc),
+    '4d-pins: hook exposes mode / setMode / finishInterview')
+  assert(/interviewSummary/.test(hookSrc),
+    '4d-pins: hook exposes the interviewSummary state')
+  assert(/turn: liveMode === 'interview' && sessionOpts\?\.interviewTurn/.test(panelSrc) || /\.\.\.\(liveMode === 'interview'/.test(panelSrc),
+    '4d-pins: panel forwards the spoken interview turn as the backend turn field')
+  assert(/tutorInterviewSummary/.test(panelSrc),
+    '4d-pins: panel wires the interview summary API')
+  assert(/voice\.mode === 'interview'/.test(voiceSrc),
+    '4d-pins: VoiceMode watches the live mode (Finish + summary view)')
+  assert(/v-mode/.test(voiceSrc) && /voice\.setMode\(/.test(voiceSrc),
+    '4d-pins: VoiceMode renders the Conversation|Interview selector wired to the engine')
+  assert(/phase4d|4d/ig.test(engineSrc + hookSrc),
+    '4d-pins: Phase 4D markers present in engine + hook comments')
 }
 
 // ---------------------------------------------------------------------------

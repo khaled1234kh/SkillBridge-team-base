@@ -136,7 +136,7 @@ ok(/aria-pressed=\{voice\.language === 'en'\}/.test(voice),
    'VoiceMode: selector exposes the active language to assistive tech')
 ok(/\.voice \.v-lang\b/.test(css) && /\.v-lang-btn\b/.test(css),
    'css: compact language selector styles present')
-ok(/\[dir=rtl\] \.v-lang/.test(css) || /\.voice\[dir="rtl"\] \.v-lang/.test(css),
+ok(/\[dir=rtl\] \.v-lang/.test(css) || /\.voice\[dir="rtl"\] \.v-lang/.test(css) || /\.voice\[dir="rtl"\] \.v-top-end/.test(css),
    'css: RTL mirror rules keep the selector on the mirrored side')
 ok(/v-end/.test(css) && /\.voice \.v-dock/.test(css),
    'css: bottom dock + End control styles present')
@@ -151,6 +151,24 @@ ok(!/steerBudget|MAX_STEER|prefLang/.test(session),
    'voiceSession.ts: no Auto steering budget / preference field remains (removed)')
 ok(/setLanguage\(/.test(panel) || /voiceLang/.test(panel),
    'CopilotPanel: Live language is resolved explicitly at open (no Auto inside Live)')
+
+// ---- Conditional ONE-ENGINE guard: no third Live surface was introduced.
+ok(!/voiceMode/i.test(panel) || /VoiceModeToken/.test(session) || /VoiceMode exists in the engine/.test(session),
+   'Phase 4D: engine owns a Live mode token (chat|interview) — one engine, no second loop')
+ok(/VoiceModeToken/.test(session) && /setMode\(/.test(session) && /interviewTurn/.test(session) && /finishInterview\(\)/.test(session),
+   'Phase 4D: voiceSession.ts exposes mode / setMode / interviewTurn / finishInterview')
+ok(/v-mode/.test(voice) && /voice\.setMode\('chat'\)/.test(voice) && /voice\.setMode\('interview'\)/.test(voice),
+   'VoiceMode: Live mode selector (Conversation | Interview) wired to the engine')
+ok(/voice\.mode === 'interview'/.test(voice),
+   'VoiceMode: interview mode gates the surface (Finish + summary)')
+ok(/\.voice \.v-mode\b/.test(css) && /\.voice \.v-mode-btn\b/.test(css),
+   'css: mode selector styles present')
+ok(/\.voice \.v-summary\b/.test(css) && /\.voice \.v-summary-body\b/.test(css),
+   'css: interview summary surface styles present')
+ok(/interviewSummary/.test(hook) && /finishInterview/.test(hook) && /setMode/.test(hook),
+   'useVoiceSession.ts: exposes mode / setMode / finishInterview / interviewSummary')
+ok(/interviewSummary:/.test(panel) && /tutorInterviewSummary/.test(panel),
+   'CopilotPanel: interview summary wired end-to-end')
 
 // ---- 6. Existing voice behavior preserved.
 ok(/setVoiceOpen\(true\)/.test(panel),
@@ -258,6 +276,20 @@ ok(/primeAutoplay\(\)/.test(voice),
    'VoiceMode: media playback is unblocked inside the Live-button gesture')
 ok(/function primeAutoplay/.test(voice),
    'VoiceMode: primeAutoplay unlocks async TTS playback (no silent-mentor abort)')
+
+// ---- 14. TTS-failure visibility (Phase 4C.1): a failed synthesis surfaces a
+//          visible localized "Voice unavailable" status/error AND never demotes
+//          the session to server-STT push-to-talk (that is reserved for a real
+//          STT failure — 'voice-unavailable' — or a detected Brave runtime).
+const ttsKind = /errorKind === 'tts'/
+ok(ttsKind.test(voice),
+   "VoiceMode: the 'tts' error kind is mapped to a visible status/error text")
+ok(/needsFallback = isBrave \|\| voice\.errorKind === 'voice-unavailable'/.test(voice),
+   "VoiceMode: 'tts' failures do NOT enable the server-STT push-to-talk fallback")
+ok(/opts\.onError\('tts'/.test(session),
+   "engine: TTS synth/play/no-adapter failures raise the distinct 'tts' kind")
+ok((session.match(/opts\.onError\('voice-unavailable'/g) || []).length === 1,
+   'engine: voice-unavailable is raised only by the real STT-loss path (sttUnavailable), never by TTS')
 
 if (problems.length) {
   console.error(`\ncheck-mentor-live-phase4b1: ${problems.length} contract(s) FAILED`)

@@ -9,12 +9,16 @@ import AssessmentsPage from './pages/AssessmentsPage'
 import UniversityPage from './pages/UniversityPage'
 import PublicProfilePage from './pages/PublicProfilePage'
 import { api } from './lib/api'
-import { IconDashboard, IconRoles, IconLearning, IconAssessment, IconUniversity, IconLogout, IconAlert, IconTarget, IconBell, IconChevron, IconBolt, IconSparkles, IconMenu, IconXClose } from './components/Icons'
+import { IconDashboard, IconRoles, IconLearning, IconAssessment, IconUniversity, IconLogout, IconAlert, IconTarget, IconBell, IconChevron, IconBolt, IconSparkles, IconMenu, IconXClose, IconSun, IconMoon, IconSearch, IconRoadmap } from './components/Icons'
+import { useThemePref } from './hooks/useThemePref'
 import SuccessAnimationOverlay from './components/SuccessAnimationOverlay'
 import ErrorBoundary from './components/ErrorBoundary'
 import { CopilotPanel } from './components/CopilotPanel'
 import CopilotOnboarding from './components/CopilotOnboarding'
 import CopilotSettingsModal from './components/CopilotSettingsModal'
+import { TourProvider, useTour } from './components/ProductTour'
+import BrandLogo from './components/BrandLogo'
+import NavigationSearch from './components/NavigationSearch'
 
 type Section = 'dashboard' | 'skills' | 'learning' | 'scenarios' | 'assessments' | 'university'
 
@@ -43,15 +47,17 @@ function NotFound() {
 
 function Shell() {
   const { session, me, logout, authBanner, clearAuthBanner, assessmentActive } = useApp()
+  const { appearance, setAppearance, interfaceStyle, setInterfaceStyle, theme, toggleTheme } = useThemePref()
   const [section, setSection] = React.useState<Section>('dashboard')
   const [navOpen, setNavOpen] = React.useState(false)
   const [notifOpen, setNotifOpen] = React.useState(false)
   const [userMenuOpen, setUserMenuOpen] = React.useState(false)
-  const [learningFocus, setLearningFocus] = React.useState<{ skillId: number; roleTitle: string } | null>(null)
+  const [learningFocus, setLearningFocus] = React.useState<{ skillId: number; roleTitle: string; competency?: string } | null>(null)
   const [prevSection, setPrevSection] = React.useState<Section | null>(null)
   const [demo, setDemo] = React.useState<{ genai_enabled: boolean; email_configured: boolean } | null>(null)
   const [copilotSettingsOpen, setCopilotSettingsOpen] = React.useState(false)
   const [copilotOnboardingForce, setCopilotOnboardingForce] = React.useState(false)
+  const userChipRef = React.useRef<HTMLButtonElement | null>(null)
 
   React.useEffect(() => {
     api.demoMode().then(setDemo).catch((e) => console.error('[app] demo-mode config failed:', e))
@@ -75,6 +81,7 @@ function Shell() {
 
   const role = session.role
   const studentId = role === 'Student' ? (session.student?.id ?? 0) : 0
+  const tour = useTour()
   const nav: { key: Section; label: string; icon: React.ReactNode; show: boolean; href?: string }[] = [
     { key: 'dashboard', label: 'Dashboard', icon: <IconDashboard size={18} />, show: true },
     { key: 'skills', label: 'Skills & Roles', icon: <IconRoles size={18} />, show: true },
@@ -95,7 +102,7 @@ function Shell() {
   //
   // Phase 5 contract: the focus object is consumed by whichever page mounts,
   // then cleared via onFocusConsumed — no URL params, no navigation loops.
-  const navigate = (dest: string, focus?: { skillId: number; roleTitle: string }) => {
+  const navigate = (dest: string, focus?: { skillId: number; roleTitle: string; competency?: string }) => {
     // A journey roots itself at the hub it started from (Skills & Roles or the
     // Dashboard). Moves between deep-link pages (learning <-> scenarios ->
     // assessments) keep that back-context, so breadcrumbs never spiral into a
@@ -118,16 +125,12 @@ function Shell() {
 
   return (
     <>
-    <div className="app-shell">
+    <div className={`app-shell interface-${interfaceStyle}`}>
       <a className="skip-link" href="#main-content">Skip to content</a>
       <aside className={`sidebar ${navOpen ? 'nav-open' : ''}`}>
         <div className="brand-block" onClick={() => goTo('dashboard')} role="button" tabIndex={0}
           onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') goTo('dashboard') }}>
-          <div className="brand-mark">S</div>
-          <div>
-            <div className="eyebrow">Career Intelligence</div>
-            <span className="sidebar-wordmark">SkillBridge</span>
-          </div>
+          <BrandLogo />
         </div>
         <button className="nav-close" aria-label="Close menu" onClick={() => setNavOpen(false)}><IconXClose size={16} /></button>
         <nav className="main-nav">
@@ -179,16 +182,29 @@ function Shell() {
           <header className="topbar">
           <div>
             <button className="nav-toggle" aria-label="Open menu" onClick={() => setNavOpen(true)}><IconMenu size={20} /></button>
-            <div>
-              <p className="eyebrow">Verified skill loop</p>
-              <h2>{titles[section]}</h2>
-            </div>
+            {interfaceStyle === 'casual-pulse' ? (
+              <NavigationSearch navigate={navigate} student={role === 'Student'} />
+            ) : (
+              <div>
+                <p className="eyebrow">Verified skill loop</p>
+                <h2>{titles[section]}</h2>
+              </div>
+            )}
           </div>
           <div className="topbar-actions">
             <span className={`role-chip status-chip ${roleClass}`}>
               {role === 'Student' && <IconTarget size={13} />}
               {roleLabel}
             </span>
+            <button
+              className={`theme-toggle ${theme === 'dark' ? 'is-dark' : ''}`}
+              aria-label={`Appearance: ${appearance}. Select next appearance`}
+              aria-pressed={theme === 'dark'}
+              title={`Appearance: ${appearance} (click for next)`}
+              onClick={toggleTheme}
+            >
+              {theme === 'dark' ? <IconSun size={16} /> : <IconMoon size={16} />}
+            </button>
             <div className="topbar-popover-anchor">
               <button className="topbar-bell" aria-label="Notifications — coming soon" aria-expanded={notifOpen}
                 onClick={(e) => { e.stopPropagation(); setNotifOpen((v) => !v) }}>
@@ -204,7 +220,7 @@ function Shell() {
               )}
             </div>
             <div className="topbar-popover-anchor">
-              <button className="user-chip" aria-label={`Account menu for ${me?.display_name || session.display_name}`}
+              <button className="user-chip" ref={userChipRef} aria-label={`Account menu for ${me?.display_name || session.display_name}`}
                 title={me?.display_name || session.display_name}
                 aria-haspopup="menu" aria-expanded={userMenuOpen}
                 onClick={(e) => { e.stopPropagation(); setUserMenuOpen((v) => !v) }}>
@@ -213,10 +229,23 @@ function Shell() {
                 <IconChevron size={13} className={`user-chev ${userMenuOpen ? 'open' : ''}`} />
               </button>
               {userMenuOpen && (
-                <div className="topbar-popover user-menu-popover" role="menu" aria-label="Account menu">
+                <div className="topbar-popover user-menu-popover" role="dialog" aria-label="Account preferences" onClick={(e) => e.stopPropagation()}>
                   <div className="popover-title">Signed in as</div>
                   <p className="popover-meta">{me?.display_name || session.display_name}</p>
                   <p className="popover-meta">{session.role}</p>
+                  <div className="visual-preferences" role="group" aria-label="Visual preferences">
+                    <div className="visual-pref-heading"><span>Interface style</span><small>{interfaceStyle === 'casual-pulse' ? 'Casual Pulse' : 'Professional'}</small></div>
+                    <div className="visual-pref-options visual-pref-options-two">
+                      <button type="button" className={interfaceStyle === 'professional' ? 'active' : ''} aria-pressed={interfaceStyle === 'professional'} onClick={() => setInterfaceStyle('professional')}>Professional</button>
+                      <button type="button" className={interfaceStyle === 'casual-pulse' ? 'active' : ''} aria-pressed={interfaceStyle === 'casual-pulse'} onClick={() => setInterfaceStyle('casual-pulse')}>Casual Pulse</button>
+                    </div>
+                    <div className="visual-pref-heading"><span>Appearance</span><small>{appearance[0].toUpperCase() + appearance.slice(1)}</small></div>
+                    <div className="visual-pref-options visual-pref-options-three">
+                      {(['light', 'dark', 'system'] as const).map((choice) => (
+                        <button key={choice} type="button" className={appearance === choice ? 'active' : ''} aria-pressed={appearance === choice} onClick={() => setAppearance(choice)}>{choice[0].toUpperCase() + choice.slice(1)}</button>
+                      ))}
+                    </div>
+                  </div>
                   {role === 'Student' && (
                     <button
                       className="btn btn-ghost popover-logout"
@@ -224,13 +253,20 @@ function Shell() {
                       onClick={() => { setUserMenuOpen(false); setCopilotSettingsOpen(true); setCopilotOnboardingForce(false) }}
                     ><IconSparkles size={15} /> Change your copilot</button>
                   )}
+                  {role === 'Student' && (
+                    <button
+                      className="btn btn-ghost popover-logout"
+                      role="menuitem"
+                      onClick={() => { setUserMenuOpen(false); tour.replay(userChipRef.current) }}
+                    ><IconRoadmap size={15} /> Replay product tour</button>
+                  )}
                   <button className="btn btn-ghost popover-logout" role="menuitem" onClick={logout}><IconLogout size={15} /> Log out</button>
                 </div>
               )}
             </div>
           </div>
         </header>
-        {section === 'dashboard' && <DashboardPage onNavigate={navigate} />}
+        {section === 'dashboard' && <DashboardPage onNavigate={navigate} interfaceStyle={interfaceStyle} onInterfaceStyleChange={setInterfaceStyle} appearance={appearance} onAppearanceChange={setAppearance} />}
         {section === 'skills' && <SkillsRolesPage onNavigate={navigate} backTo={backTo} />}
         {section === 'learning' && <LearningPage onNavigate={navigate} initialFocus={learningFocus} onFocusConsumed={() => setLearningFocus(null)} backTo={backTo} />}
         {section === 'scenarios' && <ScenariosPage onNavigate={navigate} initialFocus={learningFocus} onFocusConsumed={() => setLearningFocus(null)} backTo={backTo} />}
@@ -272,7 +308,9 @@ export default function App() {
   return (
     <AppProvider>
       <ErrorBoundary>
-        <Shell />
+        <TourProvider>
+          <Shell />
+        </TourProvider>
       </ErrorBoundary>
     </AppProvider>
   )

@@ -182,6 +182,13 @@ CATALOG_ROLES = [
       ("Risk Assessment", "Intermediate", "Security"), ("Linux", "Beginner", "DevOps"),
       ("Windows Server", "Beginner", "Security"), ("Active Directory", "Beginner", "Security"),
       ("Communication", "Intermediate", "Soft Skills"), ("Critical Thinking", "Advanced", "Soft Skills")]),
+    ("SOC Analyst",
+     "Tier 1 security operations center analyst. Monitors alerts, triages incidents, and escalates.",
+     [("SIEM", "Intermediate", "Security"), ("Incident Response", "Intermediate", "Security"),
+      ("Log Analysis", "Intermediate", "Security"), ("Network Security", "Intermediate", "Security"),
+      ("Threat Detection", "Intermediate", "Security"), ("MITRE ATT&CK", "Beginner", "Security"),
+      ("Linux", "Beginner", "DevOps"), ("Communication", "Intermediate", "Soft Skills"),
+      ("Critical Thinking", "Advanced", "Soft Skills")]),
     ("Cloud Engineer",
      "Architect and operate cloud infrastructure, ideally on AWS and Azure.",
      [("AWS", "Advanced", "DevOps"), ("Azure", "Intermediate", "DevOps"),
@@ -346,7 +353,7 @@ def _category(name):
     return genai.FALLBACK_SKILL_CATEGORIES.get(name, "General")
 
 
-def seed():
+def seed(pregen=True):
     init_db()
     with get_cursor() as c:
         c.executescript("""
@@ -458,13 +465,14 @@ def seed():
             models.update_verified_skill(student_ids[email], sk["id"], lvl)
 
     # pre-generate learning content for each student's current gaps (uses real GenAI if available)
-    for email, sid in student_ids.items():
-        _pregen_learning(sid)
+    if pregen:
+        for email, sid in student_ids.items():
+            _pregen_learning(sid)
 
     # completed assessment attempts
     for email, skill_name, score, passed, before, after, nflags in ATTEMPTS:
         sk = models.get_skill_by_name(skill_name)
-        questions = genai.generate_quiz(skill_name, "seed", num_questions=3)
+        questions = genai.generate_quiz(skill_name, "seed", num_questions=3, deterministic=True)
         flags = []
         for i in range(nflags):
             flags.append({"code": "tab_switch", "label": "Tab switch detected", "severity": "warning",
@@ -487,6 +495,24 @@ def flag_json(flags):
     return json.dumps(flags)
 
 
+def pregen_learning_for_all():
+    """Pre-generate learning content for every student (used in a background
+    thread at startup so the port binds before the slow content generation).
+
+    The deterministic generator is what made fresh-DB startup take ~30s — on
+    Render's ephemeral disk that delayed port binding past the deploy scan
+    window. Content is also generated on demand when a student opens a skill,
+    so deferring this work is safe.
+    """
+    for student in models.list_students():
+        try:
+            _pregen_learning(student["id"])
+        except Exception:
+            # Best-effort background fill: never let a single student fail the
+            # rest, and never surface to the startup path.
+            pass
+
+
 def _pregen_learning(sid):
     student = models.get_student(sid)
     role = student.get("target_role")
@@ -496,7 +522,11 @@ def _pregen_learning(sid):
     studying = f"Studying at {student['university']}" if student.get("university") else "Independent learner"
     ctx = f"{studying}; focused on becoming a {role['title']}."
     for g in gaps:
-        item = genai.generate_learning_item(g["skill_name"], g.get("category"), role["title"], ctx)
+        # Deterministic seeding: never call an external provider before the port
+        # opens. Provider enrichment is lazy — it happens when the student opens
+        # the skill, not during startup.
+        item = genai.generate_learning_item(
+            g["skill_name"], g.get("category"), role["title"], ctx, deterministic=True)
         models.upsert_learning_item(sid, g["skill_id"], item["explanation"],
                                     item["practice_exercise"], item["mini_project"],
                                     item.get("resources") or [], item.get("roadmap") or None,
@@ -535,6 +565,24 @@ def ensure_catalog_roles():
         models.create_role(catalog_company_id, title, [
             {"name": n, "level": lvl, "category": cat} for (n, lvl, cat) in skills
         ], description=desc, is_reference=1, source="catalog")
+
+
+def ensure_locations():
+    """Backfill the cascading signup reference data (countries + universities).
+
+    ``seed()`` only runs on a truly fresh DB, so an existing database that was
+    created before the locations seed (or that had those rows cleared) would
+    serve an empty ``GET /api/locations``. ``add_city`` / ``add_university`` are
+    ``INSERT OR IGNORE`` and therefore idempotent, so this is safe to run on
+    every startup and never duplicates rows or touches user data.
+    """
+    init_db()
+    for country, unis in UNIVERSITIES:
+        for uni in unis:
+            models.add_university(country, uni)
+    for country, cities in CITIES.items():
+        for city in cities:
+            models.add_city(country, city)
 
 
 if __name__ == "__main__":

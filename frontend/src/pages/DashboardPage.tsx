@@ -3,13 +3,15 @@ import { useApp } from '../AppContext'
 import { api } from '../lib/api'
 import { RELOCATION_MARKETS, marketLabel } from '../lib/markets'
 import type { Analysis, ActivitySummary, ScenarioLibrary, Student, RoleRecord, Candidate, RoleSkillCoverage, RecentJob, RecentJobsResponse, ProviderReport, JobsHealthPayload, TrackerResponse } from '../lib/types'
-import { GapPill, SkillTag, LevelBadge, ScoreRing } from '../components/widgets'
+import { GapPill, SkillTag, LevelBadge, ScoreRing, ScoreExplain, JobProvenance, feedStatusLabel, isSafeExternalUrl } from '../components/widgets'
 import MatchBreakdown from '../components/MatchBreakdown'
 import JobTrackerPanel from '../components/JobTrackerPanel'
 import JourneySpine from '../components/JourneySpine'
 import PrepareJobModal from '../components/PrepareJobModal'
 import { humanizeTopicLabel } from '../lib/topicLabels'
-import { IconArrowRight, IconCheck, IconVerified, IconExternal, IconShield, IconUpload, IconBookmark } from '../components/Icons'
+import { IconArrowRight, IconCheck, IconVerified, IconExternal, IconShield, IconUpload, IconBookmark, IconTarget, IconBook, IconChat, IconSparkles } from '../components/Icons'
+import { TUTOR_PROFILES } from '../lib/tutorProfiles'
+import type { AppearancePref, InterfacePref } from '../hooks/useThemePref'
 
 // ---------------------------------------------------------------------------
 // Recommended Next Step — documented deterministic priority (first match wins).
@@ -25,7 +27,7 @@ import { IconArrowRight, IconCheck, IconVerified, IconExternal, IconShield, Icon
 //       self-reported (not verified)        -> Assessments (verify that skill)
 //   P5. No required-skill gaps at all:
 //         - scenarios are available          -> Practice (stay sharp)
-//         - otherwise                        -> career ready (no action)
+//         - otherwise                        -> no action (all requirements met + verified)
 //
 // Rule choice only ever RECOMMENDS an action; it never changes the target role
 // and never grants verification by itself.
@@ -56,7 +58,32 @@ function nextStep(analysis: Analysis | undefined, lib: ScenarioLibrary | null, r
   const unverified = gaps.find((g) => g.status === 'strong' && !g.verified)
   if (unverified) return { action: 'assessments', label: `Verify ${unverified.skill_name}`, skillId: unverified.skill_id, roleTitle }
   if (cards.length > 0) return { action: 'scenarios', label: 'Practice a scenario to stay sharp', roleTitle }
-  return { action: null, label: 'All requirements met — career ready', roleTitle }
+  if (analysis.all_requirements_met === false || nonStrong.length > 0) {
+    return { action: 'learning', label: 'Keep building evidence for your target role', roleTitle }
+  }
+  return { action: null, label: 'All requirements met and verified — keep evidence current', roleTitle }
+}
+
+function TargetCoverageExplain({ analysis }: { analysis: Analysis }) {
+  const def = analysis.metric_definitions?.target_requirement_coverage
+  const total = analysis.skill_gaps?.length || 0
+  const missing = analysis.missing_requirements || []
+  return (
+    <ScoreExplain
+      summary="How is role coverage calculated?"
+      metric={def?.label || 'Target requirement coverage'}
+      metricKey="target_requirement_coverage"
+      numerator="sum of per-required-skill credit (0–1 each: full at/above level, partial below, reduced for adjacent-name evidence)"
+      denominator={`count of this target role's required skills${total ? ` (${total})` : ''}`}
+      source="GET /api/students/{id}/analysis → metrics.target_requirement_coverage"
+      rounding={def?.rounding || '1 decimal (backend), then shown as a whole percent'}
+      evidence={def?.evidence || 'Best available evidence per skill: verified (passed Final Assessment) outranks self-reported.'}
+      included="Every required skill of this target role. Full credit at/above the required level, partial credit for progress below it, and reduced credit for adjacent-name evidence."
+      excluded="Skills that are not requirements of this target role. Required skills with no evidence stay in the denominator and earn 0."
+      missing={missing.length ? `${missing.length} requirement(s) with no evidence yet: ${missing.map(humanizeTopicLabel).join(', ')}` : 'No requirement is missing evidence.'}
+      reported="Each row is labelled verified or self-reported; only a passed Final Assessment marks a skill verified. This is not course progress and not a hiring guarantee."
+    />
+  )
 }
 
 function NextStepAction({ step, go, roleTitle }: {
@@ -94,7 +121,13 @@ function feedHealth(providers?: ProviderReport[]) {
   }
 }
 
-function JobsCard({ student, onSaved, onNavigate }: { student?: Student; onSaved?: () => void; onNavigate?: (section: string) => void }) {
+const SCOPE_TIERS: Record<'home' | 'remote' | 'all', string[]> = {
+  home: ['city', 'country', 'country_remote', 'market'],
+  remote: ['city', 'country', 'country_remote', 'market', 'global_remote', 'unknown'],
+  all: ['city', 'country', 'country_remote', 'market', 'global_remote', 'unknown', 'different'],
+}
+
+function JobsCard({ student, onSaved, onNavigate, compact = false }: { student?: Student; onSaved?: () => void; onNavigate?: (section: string) => void; compact?: boolean }) {
   const { me, refreshStudent, applyCopilot } = useApp()
   const [data, setData] = useState<RecentJobsResponse | null>(null)
   const [tried, setTried] = useState(false)
@@ -114,9 +147,12 @@ function JobsCard({ student, onSaved, onNavigate }: { student?: Student; onSaved
   const [minMatch, setMinMatch] = useState(0)
   const [savedOnly, setSavedOnly] = useState(false)
   const [savedState, setSavedState] = useState('')
+  const [scope, setScope] = useState<'home' | 'remote' | 'all'>('home')
   const [page, setPage] = useState(0)
+  const [retryJobs, setRetryJobs] = useState(0)
   const [healthOpen, setHealthOpen] = useState(false)
   const [filtersOpen, setFiltersOpen] = useState(false)
+  const [expandedJobs, setExpandedJobs] = useState(false)
   const [health, setHealth] = useState<JobsHealthPayload | null>(null)
   const [reportedFps, setReportedFps] = useState<Set<string>>(new Set())
   const healthLoaded = useRef(false)
@@ -158,6 +194,9 @@ function JobsCard({ student, onSaved, onNavigate }: { student?: Student; onSaved
 
   useEffect(() => {
     if (!me?.student?.id || !hasCvSkills) return
+    let cancelled = false
+    let inFlight = false
+    let timer: number | undefined
     setData(null)
     setTried(false)
     setErr('')
@@ -165,14 +204,80 @@ function JobsCard({ student, onSaved, onNavigate }: { student?: Student; onSaved
     const s = me.student as any
     const location = s?.location || (me as any)?.location || ''
     const country = s?.country || (me as any)?.country || ''
-    api.recentJobs({ location, country, market, limit: 16 })
-      .then((d) => { setData(d); setTried(true) })
-      .catch((e) => { console.error('[dashboard] recent jobs failed:', e); setErr(e.message || String(e)); setData(null); setTried(true) })
-  }, [me?.student?.id, cvKey, market])
+    const schedule = (delay: number) => {
+      if (!cancelled) timer = window.setTimeout(fetchJobs, delay)
+    }
+    const fetchJobs = async () => {
+      if (cancelled || inFlight) return
+      if (document.hidden) { schedule(60_000); return }
+      inFlight = true
+      try {
+        const next = await api.recentJobs({ location, country, market, limit: 16 })
+        if (cancelled) return
+        setData(next)
+        setTried(true)
+        setErr('')
+        // A cold cache starts a single background provider fetch. Poll only
+        // our own endpoint until it completes; the server deduplicates work.
+        const building = next.status === 'stale_fallback' ||
+          (next.status === 'unavailable' && !next.providers?.length)
+        schedule(building ? 5_000 : 60_000)
+      } catch (e: any) {
+        if (cancelled) return
+        console.error('[dashboard] recent jobs failed:', e)
+        setErr(e.message || String(e))
+        setTried(true)
+        schedule(60_000)
+      } finally {
+        inFlight = false
+      }
+    }
+    const onVisible = () => {
+      if (document.hidden) return
+      window.clearTimeout(timer)
+      // A tab left open overnight should check the server on return.
+      if (!inFlight) fetchJobs()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    fetchJobs()
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [me?.student?.id, cvKey, market, retryJobs])
+
+  // Re-run the live-feed request without making a student reload the whole app.
+  // The current market/filter context remains unchanged and visible.
+  const retryLiveJobs = () => {
+    setErr('')
+    setData(null)
+    setTried(false)
+    setRetryJobs((count) => count + 1)
+  }
 
   const openJob = (j: RecentJob) => {
     applyCopilot({ page: 'jobs', skillId: null, competency: null, jobTitle: j.title, jobUrl: j.url || null })
   }
+
+  const externalRole = student?.target_role?.title || 'entry level jobs'
+  const homeCountry = (student as any)?.country || (me as any)?.country || 'Egypt'
+  const externalLocation = market === 'eg' ? 'Egypt' : (student as any)?.location || (me as any)?.location ||
+    (student as any)?.country || (me as any)?.country || 'Egypt'
+  const linkedInSearch = `https://www.linkedin.com/jobs/search/?keywords=${encodeURIComponent(externalRole)}&location=${encodeURIComponent(externalLocation)}`
+  const wuzzufSearch = `https://wuzzuf.net/search/jobs/?q=${encodeURIComponent(`${externalRole} ${externalLocation}`)}`
+  const externalSearchLinks = (
+    <p className="small muted">
+      Search directly on{' '}
+      <a href={linkedInSearch} target="_blank" rel="noopener noreferrer">LinkedIn</a>
+      {' or '}
+      <a href={wuzzufSearch} target="_blank" rel="noopener noreferrer">Wuzzuf</a>.
+      {' '}These open external searches; their results are not verified SkillBridge listings.
+    </p>
+  )
+  const checkedAt = data?.checked_at ? new Date(data.checked_at) : null
+  const checkedLabel = checkedAt && !Number.isNaN(checkedAt.getTime())
+    ? `Providers checked ${checkedAt.toLocaleString()}` : ''
 
   // Phase Q (D4): Prepare opens the grounded readiness dialog; focus returns to
   // the clicked button when it closes. The old "hop to the Skills hub" gone.
@@ -196,24 +301,31 @@ function JobsCard({ student, onSaved, onNavigate }: { student?: Student; onSaved
     }
   }
 
-  const providers = useMemo(() => Array.from(new Set((data?.jobs || []).map((j) => j.provider || j.source).filter(Boolean))) as string[], [data])
-  const workTypes = useMemo(() => Array.from(new Set((data?.jobs || []).map((j) => j.work_type || j.workplace_type || j.employment_type).filter(Boolean))) as string[], [data])
-  const seniorities = useMemo(() => Array.from(new Set((data?.jobs || []).map((j) => j.seniority).filter(Boolean))) as string[], [data])
-  const filteredJobs = useMemo(() => (data?.jobs || []).filter((j) => {
+  const providers = useMemo(() => Array.from(new Set([
+    ...(data?.jobs || []).map((j) => j.provider || j.source),
+    ...(market === 'eg' && data?.providers?.some((p) => p.source === 'Bright Data' && p.status !== 'skipped') ? ['Bright Data'] : []),
+  ].filter(Boolean))) as string[], [data, market])
+  const feedJobs = provider === 'Bright Data' && market === 'eg'
+    ? (data?.provider_jobs?.['Bright Data'] || []) : (data?.jobs || [])
+  const workTypes = useMemo(() => Array.from(new Set(feedJobs.map((j) => j.work_type || j.workplace_type || j.employment_type).filter(Boolean))) as string[], [feedJobs])
+  const seniorities = useMemo(() => Array.from(new Set(feedJobs.map((j) => j.seniority).filter(Boolean))) as string[], [feedJobs])
+  const filteredJobs = useMemo(() => feedJobs.filter((j) => {
     const hay = [j.title, j.company, j.location, j.provider, ...(j.tags || []), ...(j.required_skills || [])].join(' ').toLowerCase()
     const days = j.listed_days_ago
     const freshEnough = !freshness || (days != null && days <= Number(freshness))
+    const inScope = SCOPE_TIERS[scope].includes(j.location_tier || 'unknown')
     return (!q || hay.includes(q.toLowerCase())) && (!provider || (j.provider || j.source) === provider) &&
       (!workType || (j.work_type || j.workplace_type || j.employment_type) === workType) &&
       (!seniority || j.seniority === seniority) && freshEnough && (j.match_pct ?? 0) >= minMatch &&
+      inScope &&
       (!savedOnly || (!!j.fingerprint && savedFps.has(j.fingerprint))) &&
       (!savedState || (!!j.fingerprint && stageByFp[j.fingerprint] === savedState))
-  }), [data, q, provider, workType, seniority, freshness, minMatch, savedOnly, savedState, savedFps, stageByFp])
+  }), [feedJobs, q, provider, workType, seniority, freshness, minMatch, savedOnly, savedState, savedFps, stageByFp, scope])
   const pageSize = 8
   const pageCount = Math.max(1, Math.ceil(filteredJobs.length / pageSize))
   const pagedJobs = filteredJobs.slice(page * pageSize, page * pageSize + pageSize)
-  useEffect(() => setPage(0), [q, provider, workType, seniority, freshness, minMatch, savedOnly, savedState, market])
-  const activeFilterCount = [q, provider, workType, seniority, freshness, minMatch, savedOnly, savedState].filter(Boolean).length
+  useEffect(() => setPage(0), [q, provider, workType, seniority, freshness, minMatch, savedOnly, savedState, market, scope])
+  const activeFilterCount = [q, provider, workType, seniority, freshness, minMatch, savedOnly, savedState].filter(Boolean).length + (scope !== 'home' ? 1 : 0)
 
   const onUpload = async (file: File | undefined) => {
     if (!file || !student) return
@@ -247,8 +359,41 @@ function JobsCard({ student, onSaved, onNavigate }: { student?: Student; onSaved
           </label>
         </div>
         {cvMsg && <p className="small" style={{ color: cvWarn ? 'var(--amber)' : 'var(--green)', marginTop: 8 }}>{cvMsg}</p>}
-        {err && <div className="error" style={{ marginTop: 10 }}>{err}</div>}
+        {err && <div className="error phase7-retry-notice" role="alert" style={{ marginTop: 10 }}><span>{err}</span><button type="button" className="btn btn-sm btn-secondary" onClick={retryLiveJobs}>Retry jobs</button></div>}
       </div>
+    )
+  }
+
+  if (compact && !expandedJobs) {
+    const rows = filteredJobs.slice(0, 3)
+    return (
+      <section className="pulse-opportunities">
+        <div className="pulse-section-head">
+          <div><h3><span className={`pulse-live-dot ${data?.status === 'fresh' ? 'on' : ''}`} />Live Opportunities</h3><p>Real openings selected for your target role.</p></div>
+          <button type="button" onClick={() => setExpandedJobs(true)}>Explore jobs <IconArrowRight size={14} /></button>
+        </div>
+        <div className="pulse-job-list">
+          {!tried && <div className="pulse-job-empty">Finding current opportunities…</div>}
+          {tried && rows.length === 0 && <div className="pulse-job-empty">No matching live roles right now. Try a relocation market in the full jobs view.</div>}
+          {rows.map((job) => {
+            const pulseUrl = job.apply_safe === false || job.is_expired || job.listing_status === 'link-unavailable'
+              ? null : (isSafeExternalUrl(job.apply_url || job.url) ? (job.apply_url || job.url) : null)
+            return (
+              <div className="pulse-job-row" key={job.fingerprint || job.url || `${job.title}-${job.company}`}>
+                <span className="pulse-company-mark">{(job.company || job.title || '?').slice(0, 1).toUpperCase()}</span>
+                <a className="pulse-job-title" href={pulseUrl || undefined} target="_blank" rel="noopener noreferrer" onClick={() => openJob(job)}>{job.title}<small>{job.company || 'Company not listed'}{job.provider ? ` · ${job.provider}` : ''}</small></a>
+                <span className="pulse-job-location">{job.location_label || job.location || 'Location not listed'}</span>
+                <div className="pulse-job-tags">{(job.tags || job.required_skills || []).slice(0, 2).map((tag) => <span key={tag}>{tag}</span>)}</div>
+                <strong className="pulse-job-score">{Math.round(job.match_pct ?? 0)}%</strong>
+                <button type="button" className={`pulse-save-job ${job.fingerprint && savedFps.has(job.fingerprint) ? 'saved' : ''}`} disabled={!job.fingerprint || savingFp === job.fingerprint} aria-label={`Save ${job.title}`} onClick={() => saveJob(job)}><IconBookmark size={15} /></button>
+              </div>
+            )
+          })}
+        </div>
+        {err && <div className="error phase7-retry-notice" role="alert"><span>{err}</span><button type="button" className="btn btn-sm btn-secondary" onClick={retryLiveJobs}>Retry jobs</button></div>}
+        {(data?.status === 'cached' || data?.status === 'stale_fallback') && <p className="pulse-feed-note">{data.status === 'cached' ? 'Cached listings' : 'Cached listings · refreshing'} · availability may change</p>}
+        {checkedLabel && <p className="pulse-feed-note">{checkedLabel}</p>}
+      </section>
     )
   }
 
@@ -256,19 +401,16 @@ function JobsCard({ student, onSaved, onNavigate }: { student?: Student; onSaved
     <div className="card mt" style={{ marginTop: 18 }}>
       <div className="flex between" style={{ flexWrap: 'wrap', gap: 8 }}>
         <h3 style={{ margin: 0 }}>Jobs for you</h3>
-        <span className="small muted">
-          {data?.source === 'live' ? 'Live feed'
-            : data?.source === 'empty' ? 'No live matches right now'
-            : data?.source === 'unavailable' ? 'Live feed temporarily unavailable'
-            : '…'}
+        <span className={`small muted feed-status ${data?.status || ''}`}>
+          {data ? feedStatusLabel(data.status, data.source) : '…'}
         </span>
       </div>
       <p className="card-sub" style={{ marginTop: 4 }}>
-        Real, recent openings matched to your CV skills, ranked most fitting first. Senior roles are de-ranked for early-career profiles.
+        Real openings matched to your CV skills, ranked most fitting first. This is a live sample from the providers shown, not an exhaustive list of every opening. Senior roles are de-ranked for early-career profiles.
       </p>
       <div className="flex between" style={{ alignItems: 'center', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
         <span className="small muted">
-          JSearch and other feeds cover many markets — add a remote/relocation search country (e.g. Egypt, UAE) to widen reach.
+          {homeCountry}-first by default ({homeCountry}-based and {homeCountry}-compatible remote). Add a remote/relocation search country to widen reach.
         </span>
         <select
           className="market-select"
@@ -284,23 +426,32 @@ function JobsCard({ student, onSaved, onNavigate }: { student?: Student; onSaved
       </div>
       {data?.status === 'cached' && <p className="small muted">Showing a recently cached result while providers are protected from repeated requests.</p>}
       {data?.status === 'stale_fallback' && <p className="small muted">Showing your last available result while the feed refreshes in the background.</p>}
+      {checkedLabel && <p className="small muted">{checkedLabel} · Listing availability may change on the source site.</p>}
       <button type="button" className="btn btn-sm btn-secondary jobn-mobile-trigger" onClick={() => setFiltersOpen(true)}>Filters{activeFilterCount ? ` (${activeFilterCount})` : ''}</button>
       {filtersOpen && <div className="jobn-filter-backdrop" onMouseDown={() => setFiltersOpen(false)} />}
       <div className={`jobn-filterbar${filtersOpen ? ' is-open' : ''}`} aria-label="Job filters" onKeyDown={(e) => { if (e.key === 'Escape') setFiltersOpen(false) }}>
         <div className="jobn-mobile-heading"><strong>Filters</strong><button type="button" className="btn btn-sm btn-secondary" autoFocus onClick={() => setFiltersOpen(false)}>Done</button></div>
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search title, company, skill…" aria-label="Search jobs" />
         <select value={provider} onChange={(e) => setProvider(e.target.value)} aria-label="Filter jobs by provider"><option value="">All providers</option>{providers.map((p) => <option key={p} value={p}>{p}</option>)}</select>
+        <select value={scope} onChange={(e) => setScope(e.target.value as 'home' | 'remote' | 'all')} aria-label="Filter jobs by search scope"><option value="home">{homeCountry} &amp; {homeCountry}-compatible remote</option><option value="remote">Add worldwide remote</option><option value="all">Include other countries</option></select>
         <select value={workType} onChange={(e) => setWorkType(e.target.value)} aria-label="Filter jobs by work type"><option value="">All work types</option>{workTypes.map((v) => <option key={v} value={v}>{v}</option>)}</select>
         <select value={seniority} onChange={(e) => setSeniority(e.target.value)} aria-label="Filter jobs by seniority"><option value="">All seniority levels</option>{seniorities.map((v) => <option key={v} value={v}>{v}</option>)}</select>
         <select value={freshness} onChange={(e) => setFreshness(e.target.value)} aria-label="Filter jobs by freshness"><option value="">Any posting date</option><option value="1">Posted today</option><option value="3">Past 3 days</option><option value="7">Past week</option><option value="30">Past month</option></select>
         <select value={minMatch} onChange={(e) => setMinMatch(Number(e.target.value))} aria-label="Minimum job match"><option value={0}>Any match</option><option value={20}>20%+ match</option><option value={40}>40%+ match</option><option value={60}>60%+ match</option></select>
         <button type="button" className={savedOnly ? 'btn btn-sm' : 'btn btn-sm btn-secondary'} onClick={() => setSavedOnly((v) => !v)}>{savedOnly ? 'Saved only' : 'Saved jobs'}</button>
         <select value={savedState} onChange={(e) => setSavedState(e.target.value)} aria-label="Filter jobs by application state"><option value="">Any tracker state</option><option value="saved">Saved</option><option value="preparing">Preparing</option><option value="applied">Applied</option><option value="screening">Screening</option><option value="interview">Interview</option><option value="offer">Offer</option></select>
-        {(q || provider || workType || seniority || freshness || minMatch || savedOnly || savedState) && <button type="button" className="btn btn-sm btn-secondary" onClick={() => { setQ(''); setProvider(''); setWorkType(''); setSeniority(''); setFreshness(''); setMinMatch(0); setSavedOnly(false); setSavedState('') }}>Clear filters</button>}
+        {(q || provider || workType || seniority || freshness || minMatch || savedOnly || savedState || scope !== 'home') && <button type="button" className="btn btn-sm btn-secondary" onClick={() => { setQ(''); setProvider(''); setWorkType(''); setSeniority(''); setFreshness(''); setMinMatch(0); setSavedOnly(false); setSavedState(''); setScope('home') }}>Clear filters</button>}
         <button type="button" className="btn btn-sm btn-secondary" onClick={showHealth}>Provider status</button>
       </div>
       {tried && data && <p className="small muted" aria-live="polite">{filteredJobs.length} matching job{filteredJobs.length === 1 ? '' : 's'} shown</p>}
-      {err && <div className="error" style={{ marginBottom: 10 }}>{err}</div>}
+      {tried && data?.groups && !provider && (
+        <p className="small muted feed-scope">
+          Matched by scope: {data.groups.local_count} in your region · {data.groups.broader_count} broader remote · {data.groups.other_count} other countries.
+        </p>
+      )}
+      {tried && data && data.jobs.length > 0 && <p className="small muted feed-sample-note">Listings are a live sample from the providers shown — not an exhaustive market list.</p>}
+      {provider === 'Bright Data' && market === 'eg' && <p className="small muted">Egypt listings returned by Bright Data for your target role. This is a live search sample, not every available job in Egypt.</p>}
+      {err && <div className="error phase7-retry-notice" role="alert" style={{ marginBottom: 10 }}><span>{err}</span><button type="button" className="btn btn-sm btn-secondary" onClick={retryLiveJobs}>Retry jobs</button></div>}
       {tried && data?.providers && data.providers.length > 0 && (() => {
         const h = feedHealth(data.providers)
         if (!h.total) return null
@@ -346,12 +497,13 @@ function JobsCard({ student, onSaved, onNavigate }: { student?: Student; onSaved
                     {j.company}
                     {j.is_expired ? ' · Expired' : ''}
                     {!j.is_expired && j.listed_days_ago != null ? ` · Posted ${j.listed_days_ago}d ago` : ''}
-                    {j.source ? ` · ${j.source}` : ''}
+                    {j.provider || j.source ? ` · ${j.provider || j.source}` : ''}
                     {j.seniority ? ` · ${j.seniority}` : ''}
                     {place ? ` · ${place}` : ''}
                   </span>
                   {j.match_reason && <span className="job-reason">{j.match_reason}</span>}
-                  {(j.description_excerpt || j.work_type || j.link_state) && <span className="small muted">{j.description_excerpt || [j.work_type, j.link_state].filter(Boolean).join(' · ')}</span>}
+                  <JobProvenance job={j} />
+                  {j.description_excerpt && <span className="small muted">{j.description_excerpt}</span>}
                   {j.fingerprint && stageByFp[j.fingerprint] && <span className="small muted">Tracker: {stageByFp[j.fingerprint]}</span>}
                 </div>
                 {j.tags && j.tags.length > 0 && (
@@ -361,12 +513,10 @@ function JobsCard({ student, onSaved, onNavigate }: { student?: Student; onSaved
                 )}
               </>
             )
-            const safeUrl = j.apply_url || j.url
-            const row = j.is_expired || j.listing_status === 'link-unavailable' || !safeUrl ? (
-              <div className={`resource ${isSeniorFit ? 'job-senior' : ''}`} title="Listing has expired or has no safe direct link">
-                {inner}
-              </div>
-            ) : (
+            const rawUrl = j.apply_url || j.url
+            const safeUrl = j.is_expired || j.listing_status === 'link-unavailable' || j.apply_safe === false ||
+              !isSafeExternalUrl(rawUrl) ? null : rawUrl
+            const row = safeUrl ? (
               <a
                 className={`resource ${isSeniorFit ? 'job-senior' : ''}`}
                 href={safeUrl}
@@ -376,13 +526,31 @@ function JobsCard({ student, onSaved, onNavigate }: { student?: Student; onSaved
               >
                 {inner}
               </a>
+            ) : (
+              <div className={`resource ${isSeniorFit ? 'job-senior' : ''}`} title="No validated external apply link is available for this listing">
+                {inner}
+              </div>
             )
             return (
-              <div className="job-row" key={`${j.title}-${i}`}>
+              <div className="job-row hcard-opportunity" key={`${j.title}-${i}`}>
                 {row}
                 {j.fingerprint && student ? (
                   <>
                     <div className="job-row-actions">
+                      {safeUrl ? (
+                        <a
+                          className="btn btn-sm job-apply-btn"
+                          href={safeUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={() => openJob(j)}
+                          aria-label={`Apply to ${j.title} on the employer site`}
+                        >
+                          Apply <IconExternal size={12} />
+                        </a>
+                      ) : (
+                        <span className="small muted job-no-apply" title="No validated safe external link for this listing">No safe apply link</span>
+                      )}
                       <button
                         type="button"
                         className={`job-save-btn${savedFps.has(j.fingerprint) ? ' on' : ''}`}
@@ -408,11 +576,16 @@ function JobsCard({ student, onSaved, onNavigate }: { student?: Student; onSaved
           })}
           {pageCount > 1 && <div className="jobn-pages"><button type="button" className="btn btn-sm btn-secondary" disabled={page === 0} onClick={() => setPage((n) => n - 1)}>Previous</button><span className="small muted">Page {page + 1} of {pageCount}</span><button type="button" className="btn btn-sm btn-secondary" disabled={page + 1 >= pageCount} onClick={() => setPage((n) => n + 1)}>Next</button></div>}
         </div>
-      ) : data && data.jobs.length > 0 ? (
+      ) : data && feedJobs.length > 0 ? (
         <div className="empty">No jobs match these filters. Clear filters to see the current feed.</div>
+      ) : provider === 'Bright Data' && market === 'eg' && data?.providers?.some((p) => p.source === 'Bright Data' && p.status === 'failed') ? (
+        <div><div className="empty">Bright Data did not return Egypt listings this time. Other providers are unaffected.</div><div className="phase7-retry-action"><button type="button" className="btn btn-sm btn-secondary" onClick={retryLiveJobs}>Retry live jobs</button></div></div>
+      ) : provider === 'Bright Data' && market === 'eg' ? (
+        <div className="empty">Bright Data returned no matching Egypt listings for this target role right now. Try a broader role or check again later.</div>
       ) : data?.source === 'empty' ? (
         <div>
           <div className="empty">No live roles matched this search right now — nothing is invented to fill the list.</div>
+          {externalSearchLinks}
           {data.providers && data.providers.some((p) => p.status === 'failed') ? (
             <p className="small muted" style={{ marginTop: 8 }}>
               Unavailable now: {data.providers.filter((p) => p.status === 'failed').map((f) => f.source).join(', ')}.
@@ -421,7 +594,9 @@ function JobsCard({ student, onSaved, onNavigate }: { student?: Student; onSaved
         </div>
       ) : data?.source === 'unavailable' ? (
         <div>
-          <div className="empty">Live job providers are temporarily unavailable. Try again shortly.</div>
+          <div className="empty">{data.status === 'unavailable' && !data.providers?.length ? 'Checking job providers now…' : 'Live job providers are temporarily unavailable. Try again shortly.'}</div>
+          {externalSearchLinks}
+          <div className="phase7-retry-action"><button type="button" className="btn btn-sm btn-secondary" onClick={retryLiveJobs}>Retry live jobs</button></div>
           {data.providers && data.providers.some((p) => p.status === 'failed') ? (
             <p className="small muted" style={{ marginTop: 8 }}>
               Unavailable now: {data.providers.filter((p) => p.status === 'failed').map((f) => f.source).join(', ')}.
@@ -444,16 +619,16 @@ function JobsCard({ student, onSaved, onNavigate }: { student?: Student; onSaved
   )
 }
 
-export default function DashboardPage({ onNavigate }: { onNavigate?: (section: string) => void }) {
+export default function DashboardPage({ onNavigate, interfaceStyle = 'professional', onInterfaceStyleChange, appearance = 'system', onAppearanceChange }: { onNavigate?: (section: string) => void; interfaceStyle?: InterfacePref; onInterfaceStyleChange?: (style: InterfacePref) => void; appearance?: AppearancePref; onAppearanceChange?: (appearance: AppearancePref) => void }) {
   const { me } = useApp()
   if (!me) return null
-  if (me.entity_type === 'student') return <StudentDashboard student={me.student} analysis={me.analysis ?? undefined} onNavigate={onNavigate} />
+  if (me.entity_type === 'student') return <StudentDashboard student={me.student} analysis={me.analysis ?? undefined} onNavigate={onNavigate} pulse={interfaceStyle === 'casual-pulse'} onInterfaceStyleChange={onInterfaceStyleChange} appearance={appearance} onAppearanceChange={onAppearanceChange} />
   if (me.entity_type === 'company') return <CompanyDashboard />
   return <UniversityDashboard />
 }
 
-function StudentDashboard({ student, analysis, onNavigate }: { student?: Student; analysis?: Analysis; onNavigate?: (section: string, focus?: { skillId: number; roleTitle: string }) => void }) {
-  const { refreshStudent, applyCopilot } = useApp()
+function StudentDashboard({ student, analysis, onNavigate, pulse = false, onInterfaceStyleChange, appearance = 'system', onAppearanceChange }: { student?: Student; analysis?: Analysis; onNavigate?: (section: string, focus?: { skillId: number; roleTitle: string }) => void; pulse?: boolean; onInterfaceStyleChange?: (style: InterfacePref) => void; appearance?: AppearancePref; onAppearanceChange?: (appearance: AppearancePref) => void }) {
+  const { refreshStudent, applyCopilot, tutorId } = useApp()
   const [trackerTick, setTrackerTick] = useState(0)
   const [activity, setActivity] = useState<ActivitySummary | null>(null)
   const [shareOn, setShareOn] = useState(!!student?.share_public)
@@ -581,11 +756,81 @@ function StudentDashboard({ student, analysis, onNavigate }: { student?: Student
     )
   }
 
+  if (pulse) {
+    const coverage = analysis.metrics?.target_requirement_coverage ?? analysis.match_score
+    const firstName = (student.name || 'there').trim().split(/\s+/)[0]
+    const focus = ns.skillId ? { skillId: ns.skillId, roleTitle: analysis.role_title } : undefined
+    const skillNames = gaps.slice(0, 4).map((g) => humanizeTopicLabel(g.skill_name))
+    const mentor = TUTOR_PROFILES.find((t) => t.id === tutorId) || TUTOR_PROFILES[0]
+    const openCopilot = (prompt?: string) => window.dispatchEvent(new CustomEvent('copilot:focus', { detail: { prompt } }))
+    const hour = new Date().getHours()
+    const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'
+    const journey = [
+      { label: 'Choose Role', note: 'Define your goals', state: 'done' },
+      { label: 'Learn', note: 'Build your skills', state: ns.action === 'learning' ? 'active' : 'next' },
+      { label: 'Practice', note: 'Apply what you learn', state: scenarioLib?.scenarios?.length ? 'ready' : 'next' },
+      { label: 'Verify', note: 'Show your proficiency', state: verifiedCount ? 'ready' : 'next' },
+      { label: 'Apply', note: 'Get hired', state: (tracker?.items?.length || 0) > 0 ? 'ready' : 'next' },
+    ]
+    return (
+      <div className="pulse-dashboard">
+        <header className="pulse-welcome">
+          <div><span className="pulse-kicker">YOUR NEXT CHAPTER</span><h1>{greeting}, {firstName}<span className="pulse-heading-dot">.</span></h1><p>A little progress today. More possibilities tomorrow.</p></div>
+          <div className="pulse-date"><span>{new Intl.DateTimeFormat('en', { weekday: 'long', month: 'short', day: 'numeric' }).format(new Date())}</span><strong><IconVerified size={14} /> {verifiedCount} verified skills</strong></div>
+        </header>
+
+        <div className="pulse-dashboard-grid">
+          <div className="pulse-main-column">
+            <section className="pulse-role-card hcard-progress">
+              <div className="pulse-role-icon"><IconTarget size={32} /></div>
+              <div className="pulse-role-copy"><span>Your target role</span><h2>{analysis.role_title}</h2><div>{skillNames.map((name) => <em key={name}>{name}</em>)}</div></div>
+              <ScoreRing value={coverage} label="Role coverage" explainer="Coverage of the role requirements, including self-reported evidence. Not course progress or a hiring guarantee." explain={<TargetCoverageExplain analysis={analysis} />} />
+              <div className="pulse-halfway"><h3>{coverage >= 75 ? 'Almost there!' : coverage >= 40 ? 'Halfway there!' : 'Keep building!'}</h3><p>Keep learning and practicing to raise your requirement coverage.</p><button type="button" onClick={() => go('skills')}>View role details <IconArrowRight size={14} /></button></div>
+            </section>
+
+            <section className="pulse-journey-card hcard-success">
+              <div className="pulse-section-head"><div><h3>Your Career Journey</h3></div><button type="button" onClick={() => go('learning')}>View full path <IconArrowRight size={14} /></button></div>
+              <div className="pulse-journey-line">
+                {journey.map((item, index) => <button type="button" className={`pulse-journey-step ${item.state}`} key={item.label} onClick={() => index === 4 ? focusSpot(jobsRef.current) : go(['skills', 'learning', 'scenarios', 'assessments'][index])}><span>{item.state === 'done' ? <IconCheck size={16} /> : index + 1}</span><b>{item.label}</b><small>{item.note}</small></button>)}
+              </div>
+              <div className="pulse-learning-card hcard-action">
+                <div className="pulse-learning-icon"><IconBook size={30} /></div>
+                <div className="pulse-learning-copy"><span>Recommended next step</span><h3>{ns.label}</h3><p>Build practical evidence for your next opportunity.</p><div><em><IconSparkles size={12} /> Personalized</em><em>{gapCount} skill gaps</em></div></div>
+                <div className="pulse-learning-action"><small>Make your next move</small><button type="button" onClick={() => go(ns.action || 'skills', focus)}>{ns.action === 'assessments' ? 'Verify a skill' : ns.action === 'scenarios' ? 'Open practice' : ns.action === 'learning' ? 'Continue learning' : 'Explore roles'} <IconArrowRight size={15} /></button></div>
+              </div>
+            </section>
+
+            <div ref={jobsRef} className="jny-board pulse-jobs-board" data-dash-board="jobs"><JobsCard compact student={student} onSaved={() => setTrackerTick((n) => n + 1)} onNavigate={onNavigate} /></div>
+            <details className="pulse-details"><summary>Your evidence & application tracker <IconArrowRight size={16} /></summary><div className="pulse-evidence"><MatchBreakdown kind="target-role" pct={analysis.match_score} onRequest={() => api.targetRoleMatchBreakdown(student.id)} /><div className="pulse-skill-list">{skillRows.map((s) => <SkillTag key={s.name} {...s} />)}</div><div ref={trackerRef}><JobTrackerPanel student={student} refreshKey={trackerTick} /></div></div></details>
+          </div>
+
+          <aside className="pulse-mentor-rail">
+            <section className="pulse-mentor-card hcard-ai">
+              <div className="pulse-mentor-title"><span className="pulse-kicker">IN YOUR CORNER</span><IconSparkles size={17} /></div>
+              <div className="pulse-mentor-avatar"><img src={mentor.avatar} alt={mentor.name} /></div>
+              <h3 className="pulse-mentor-name">Meet {mentor.name}<span>Your AI learning companion</span></h3>
+              <p>{mentor.specialty}.<br />One conversation closer to clarity.</p>
+              <div className="pulse-mentor-prompts">
+                <button type="button" onClick={() => openCopilot(`How can I reach my target role as ${analysis.role_title}?`)}>Help me reach my target role <IconArrowRight size={14} /></button>
+                <button type="button" onClick={() => openCopilot(`Suggest a learning plan for my target role: ${analysis.role_title}.`)}>Plan my next learning session <IconArrowRight size={14} /></button>
+                <button type="button" onClick={() => go('assessments')}>Review my evidence <IconArrowRight size={14} /></button>
+                <button type="button" onClick={() => go('skills')}>What skills are in demand? <IconArrowRight size={14} /></button>
+              </div>
+              <button type="button" className="pulse-ask-nova" onClick={() => openCopilot()}><IconChat size={17} /> Talk to {mentor.name}</button>
+            </section>
+            <section className="pulse-mini-card"><span>Interface style</span><div><button type="button" onClick={() => onInterfaceStyleChange?.('professional')}>Professional</button><button type="button" className="active" aria-pressed="true">⌁ Pulse</button></div></section>
+            <section className="pulse-mini-card pulse-appearance"><span>Appearance</span><div>{(['light', 'dark', 'system'] as const).map((choice) => <button type="button" key={choice} className={appearance === choice ? 'active' : ''} aria-pressed={appearance === choice} onClick={() => onAppearanceChange?.(choice)}>{choice[0].toUpperCase() + choice.slice(1)}</button>)}</div></section>
+          </aside>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div>
-      <section className="dashboard-hero">
+      <section className="dashboard-hero hcard-hero">
         <div className="dashboard-hero-copy">
-          <p className="eyebrow">Career Readiness</p>
+          <p className="eyebrow">Target requirement coverage</p>
           <h1>{analysis.role_title}</h1>
           <p>
             SkillBridge compares your current evidence against the role requirements, then turns
@@ -595,12 +840,19 @@ function StudentDashboard({ student, analysis, onNavigate }: { student?: Student
             <button className="btn btn-primary" onClick={() => go('learning')}>
               <IconArrowRight size={16} /> Continue learning
             </button>
-            <button className="btn" onClick={() => go('assessments')}>
+            <button className="btn btn-outline" onClick={() => go('assessments')}>
               <IconVerified size={16} /> Verify a skill
             </button>
           </div>
         </div>
-        <ScoreRing value={analysis.match_score} />
+        <ScoreRing
+          value={analysis.metrics?.target_requirement_coverage ?? analysis.match_score}
+          label="Requirement coverage"
+          explainer={analysis.metric_definitions?.target_requirement_coverage
+            ? `${analysis.metric_definitions.target_requirement_coverage.formula}. Evidence: ${analysis.metric_definitions.target_requirement_coverage.evidence}`
+            : 'Level-aware coverage of this role’s required skills. Partial credit for progress below a required level; a gap keeps this below 100%.'}
+          explain={<TargetCoverageExplain analysis={analysis} />}
+        />
       </section>
       {student && (
         <MatchBreakdown kind="target-role" pct={analysis.match_score}
@@ -623,12 +875,12 @@ function StudentDashboard({ student, analysis, onNavigate }: { student?: Student
       />
 
       <div className="insight-grid">
-        <div className="insight-card">
+        <div className="insight-card hcard-success">
           <span className="label">Verified Skills</span>
           <strong>{student.verified_skills.length}</strong>
           <small>Earned via passed assessments</small>
         </div>
-        <div className="insight-card">
+        <div className="insight-card hcard-warning">
           <span className="label">Skill Gap Summary</span>
           <div className="gap-summary">
             <span><b>{strong}</b> strong</span>
@@ -636,10 +888,12 @@ function StudentDashboard({ student, analysis, onNavigate }: { student?: Student
             <span><b>{missingCount}</b> missing</span>
           </div>
         </div>
-        <div className="insight-card">
+        <div className="insight-card hcard-action">
           <span className="label">Recommended Next Step</span>
           <strong className="next-step-label">{ns.label}</strong>
-          <small>{gapCount === 0 ? 'Career ready' : `${gapCount} skill gap${gapCount === 1 ? '' : 's'} to close`}</small>
+          <small>{gapCount === 0 && analysis.all_requirements_met !== false
+            ? 'All requirements currently met'
+            : `${gapCount} skill gap${gapCount === 1 ? '' : 's'} to close`}</small>
           <NextStepAction step={ns} go={go} roleTitle={analysis.role_title} />
           {ns.action === null && gapCount === 0 && (
             <button type="button" className="btn btn-sm dash-next-go" onClick={() => onFocus('find')}>
@@ -839,6 +1093,19 @@ function CompanyDashboard() {
                     <span className="small muted">Applicant skill coverage</span>
                     <span className="small muted">{cov.candidate_count} candidate{cov.candidate_count === 1 ? '' : 's'} · {weakest.length} skill{weakest.length === 1 ? '' : 's'} short</span>
                   </div>
+                  <ScoreExplain
+                    summary="How is applicant coverage calculated?"
+                    metric="Applicant strong-skill share per requirement"
+                    numerator="matched candidates whose best evidence meets or exceeds the required level"
+                    denominator={`matched candidates for this role${cov.candidate_count ? ` (${cov.candidate_count})` : ''}`}
+                    source="GET /api/company/roles/{id}/skills → coverage_pct"
+                    rounding="1 decimal in the backend; shown here as a whole percent"
+                    evidence="Same strong/gap/missing status as each candidate's gap map; verified outranks self-reported."
+                    included="Candidates whose target role is this exact role."
+                    excluded="Candidates targeting other roles. Only aggregate counts are exposed, never a candidate's raw skills."
+                    missing="A requirement with no matched candidates shows 0% and is not invented."
+                    reported="This is a coverage share across matched candidates, not an offer or pass rate."
+                  />
                   {cov.skills.map((s) => (
                     <div className="cov-row" key={s.skill_id}>
                       <div className="cov-label">{s.skill_name} <span className="lv">{s.required_level}</span></div>
@@ -852,6 +1119,22 @@ function CompanyDashboard() {
                     </div>
                   ))}
                 </div>
+              )}
+              {list.length > 0 && (
+                <ScoreExplain
+                  summary="How are candidate match scores calculated?"
+                  metric="Candidate target requirement coverage"
+                  metricKey="target_requirement_coverage"
+                  numerator="sum of per-required-skill credit for that candidate"
+                  denominator="count of this role's required skills"
+                  source="GET /api/company/roles/{id}/candidates → match_score (matching.analyze_student)"
+                  rounding="1 decimal in the backend; shown here as a whole percent"
+                  evidence="Each candidate's best available evidence per required skill (verified outranks self-reported)."
+                  included="Candidates whose chosen target role is this exact role."
+                  excluded="Everyone else. Only the aggregate score and gap/verified counts are shown."
+                  missing="Component-level gaps are not itemized here; the score already counts them at 0 or partial credit."
+                  reported="Visible only to the company that owns this role."
+                />
               )}
               {list.length > 0 && (
                 <div className="cand-list">

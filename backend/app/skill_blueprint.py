@@ -23,7 +23,7 @@ student progress.
 import hashlib
 import re
 
-BLUEPRINT_VERSION = "skill-blueprint-v2"
+BLUEPRINT_VERSION = "skill-blueprint-v1"
 
 # Bump DERIVED_VERSION when the derivation logic, prompt, or validation rules
 # change.  Old cached entries keyed under a prior version are ignored.
@@ -37,14 +37,6 @@ _DEFAULT_COMPETENCIES = 5
 # ------------------------------------------------------------------ TRUSTED
 
 BLUEPRINT = {
-    # Phase 1 curated vertical slice. Do not ask an LLM to extend this graph.
-    "python": {
-        # Curated sequence: Error Handling depends on callable functions, so a
-        # weak Error Handling score must never move ahead of Functions.
-        "Beginner": ["Python Functions", "Python Error Handling"],
-        "Intermediate": [],
-        "Advanced": [],
-    },
     "docker": {
         "Beginner": ["Containers", "Images", "Basic commands"],
         "Intermediate": ["Dockerfile", "Ports", "Volumes", "Networking"],
@@ -64,6 +56,24 @@ BLUEPRINT = {
         "Beginner": ["Queries & filtering", "Sorting & limiting"],
         "Intermediate": ["Aggregation", "Joins", "Subqueries", "Indexing basics"],
         "Advanced": ["Window functions", "Query optimization", "Transactions", "Schema design"],
+    },
+    # Curated vertical slice: these topics are the only ones with authored,
+    # validated lesson content in ``knowledge_base``.  The blueprint stays
+    # deliberately narrow so the diagnostic and path never invent Python topics
+    # the trusted knowledge base cannot serve.  Python Data Structures is the
+    # next curated pathway after Functions and Error Handling.
+    "python": {
+        "Beginner": ["Python Functions", "Python Error Handling"],
+        "Intermediate": ["Python Data Structures"],
+        "Advanced": [],
+    },
+    # Curated vertical slice for Agentic AI: nine authored competencies in
+    # ``knowledge_base.agentic_topics``. The blueprint is deliberately narrow so
+    # the diagnostic and path only surface topics the trusted catalog can serve.
+    "agentic ai": {
+        "Beginner": ["Tool Use & Function Calling", "Model Context Protocol (MCP)"],
+        "Intermediate": ["Retrieval-Augmented Generation (RAG)", "Multi-Agent Systems", "Agent Memory"],
+        "Advanced": ["Planning & Task Decomposition", "Agent Evaluation & Guardrails", "Context Engineering", "Agent Security & Prompt Injection"],
     },
 }
 

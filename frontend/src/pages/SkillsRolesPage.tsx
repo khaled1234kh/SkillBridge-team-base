@@ -2,10 +2,11 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useApp } from '../AppContext'
 import { api } from '../lib/api'
 import { RELOCATION_MARKETS, marketLabel } from '../lib/markets'
-import type { RoleRecord, Student, Skill, RolesResponse, EscoOccupation, Analysis, RoleRecommendation, RoleRecommendationsResponse, SavedRolesResponse, ScenarioLibrary, RoleMappingMatch, RoleMappingTarget, RoleMappingEvent, RecentRole, RoleProvenance, RecentJob, RecentJobsResponse } from '../lib/types'
+import type { RoleRecord, Student, Skill, RolesResponse, EscoOccupation, Analysis, RoleRecommendation, RoleRecommendationsResponse, SavedRolesResponse, ScenarioLibrary, RoleMappingMatch, RoleMappingTarget, RoleMappingEvent, RecentRole, RoleProvenance, RecentJob, RecentJobsResponse, CanonicalMetricKey } from '../lib/types'
 import { IconPlus, IconEdit, IconTrash, IconUpload, IconSearch, IconCheck, IconAlert, IconTarget, IconBookmark, IconCompare, IconBack, IconShield, IconBolt, IconArrowRight } from '../components/Icons'
-import { SkillTag, GapPill } from '../components/widgets'
+import { SkillTag, GapPill, ScoreExplain } from '../components/widgets'
 import { IconRoles } from '../components/Icons'
+import { MiniTourBanner } from '../components/ProductTour'
 import { ConfirmModal, ToastRegion, useToast } from '../components/ui'
 import MatchBreakdown from '../components/MatchBreakdown'
 import { humanizeTopicLabel } from '../lib/topicLabels'
@@ -238,6 +239,10 @@ function serializeExplorer(tab: ExplorerTab, q: string, fam: string[]): string {
 
 type ExplorerFilters = { location: string[]; level: string[]; category: string[]; skill: string[]; family: string[] }
 
+// Canonical `catalogue_similarity` (name-only overlap) for catalogue roles that
+// the recommendation engine did not score. This is EXPLICITLY not a competence
+// or verification claim: it ignores levels and never counts as a requirement
+// being met. Every surface that shows it must label it "Catalogue similarity".
 function matchPctOf(r: RoleRecord, cvSkillNames: string[]): number {
   if (r.required_skills.length === 0) return 0
   const present = r.required_skills.reduce((n, s) => n + (cvSkillNames.includes(s.name.toLowerCase().trim()) ? 1 : 0), 0)
@@ -251,7 +256,13 @@ function matchPctOf(r: RoleRecord, cvSkillNames: string[]): number {
 // reason text) whenever the role appears there; otherwise falls back to the
 // same required-skill overlap math the backend uses. Every surface (cards,
 // drawer and compare) reads this helper so a role always shows one match.
-export interface RoleMatchInfo { pct: number | null; reason?: string; confidence?: string }
+export interface RoleMatchInfo {
+  pct: number | null
+  reason?: string
+  confidence?: string
+  metric?: CanonicalMetricKey
+  metricLabel?: string
+}
 
 function backendRecMap(recs: RoleRecommendationsResponse | null): Map<number, RoleRecommendation> {
   const m = new Map<number, RoleRecommendation>()
@@ -263,9 +274,15 @@ function backendRecMap(recs: RoleRecommendationsResponse | null): Map<number, Ro
 function displayMatchOf(role: RoleRecord, cvSkillNames: string[], recByRole: Map<number, RoleRecommendation>): RoleMatchInfo {
   const rec = recByRole.get(role.id)
   if (rec && rec.match_score != null) {
-    return { pct: Math.round(rec.match_score), reason: rec.reason, confidence: rec.confidence }
+    return {
+      pct: Math.round(rec.match_score), reason: rec.reason, confidence: rec.confidence,
+      metric: 'target_requirement_coverage', metricLabel: 'Requirement coverage',
+    }
   }
-  return { pct: cvSkillNames.length > 0 ? matchPctOf(role, cvSkillNames) : null }
+  return {
+    pct: cvSkillNames.length > 0 ? matchPctOf(role, cvSkillNames) : null,
+    metric: 'catalogue_similarity', metricLabel: 'Catalogue similarity',
+  }
 }
 
 function roleSourceLabel(r: RoleRecord): string {
@@ -336,7 +353,7 @@ function RoleCard({ r, selected, onSelect, selectable, dest, chips }: {
 }) {
   const matchedCount = chips?.filter((c) => c.matched).length ?? 0
   return (
-    <div className={`sro3-role ${selected ? 'sro3-role-selected' : ''}`}>
+    <div className={`sro3-role hcard-opportunity ${selected ? 'sro3-role-selected' : ''}`}>
       <div className="sro3-role-top">
         <div className="sro3-role-head">
           <div className="sro3-role-title">
@@ -375,7 +392,7 @@ function RoleCard({ r, selected, onSelect, selectable, dest, chips }: {
             </span>
           ) : <span />}
           {selectable && (
-            <button className={`btn btn-sm ${selected ? '' : 'btn-primary'}`} onClick={onSelect} disabled={selected}>
+            <button className="btn btn-sm srb-btn-outline" onClick={onSelect} disabled={selected}>
               {selected ? '✓ Target Career' : 'Select as target'}
             </button>
           )}
@@ -391,7 +408,7 @@ function RecommendationCard({ rec, selected, onSelect, busy, saved, onToggleSave
 }) {
   const srcLabel = rec.source === 'company' ? 'Company role' : rec.source === 'catalog' ? 'Catalog' : 'ESCO'
   return (
-    <div className={`sro3-role ${selected ? 'sro3-role-selected' : ''}`}>
+    <div className={`sro3-role hcard-opportunity ${selected ? 'sro3-role-selected' : ''}`}>
       <div className="sro3-role-top">
         <div className="sro3-role-head">
           <div className="sro3-role-title">
@@ -435,7 +452,7 @@ function RecommendationCard({ rec, selected, onSelect, busy, saved, onToggleSave
             <IconBookmark size={15} /> <span>{saved ? 'Saved' : 'Save'}</span>
           </button>
         )}
-        <button className={`btn btn-sm ${selected ? '' : 'btn-primary'}`} onClick={onSelect} disabled={selected || busy}>
+        <button className="btn btn-sm srb-btn-outline" onClick={onSelect} disabled={selected || busy}>
           {busy ? 'Selecting…' : selected ? '✓ Target Career' : 'Select as target'}
         </button>
       </div>
@@ -450,24 +467,73 @@ function RecommendationCard({ rec, selected, onSelect, busy, saved, onToggleSave
 // ------------------------------------------------------------------ New design primitives (redesigned Skills & Roles)
 function MatchRing({ pct, size = 88, label }: { pct: number | null; size?: number; label?: string }) {
   const safe = pct == null ? 0 : Math.max(0, Math.min(100, Math.round(pct)))
+  const visibleLabel = label
+    ? /similarity/i.test(label)
+      ? 'similarity'
+      : /coverage/i.test(label)
+        ? 'coverage'
+        : label
+    : ''
   return (
     <div
       className="srb-match-ring"
       style={{ '--pct': safe, width: size, height: size } as React.CSSProperties}
       role="img"
-      aria-label={pct == null ? 'Match not computed yet' : `${safe}% skill match`}
+      title={label ? `${label}: ${pct == null ? 'not computed yet' : `${safe}%`}` : undefined}
+      aria-label={pct == null ? 'Match not computed yet' : `${safe}% ${label || 'requirement coverage'}`}
     >
       <div className="srb-match-inner">
         {pct == null ? <span className="srb-match-none">—</span> : <strong>{safe}%</strong>}
-        {label && <span className="srb-match-label">{label}</span>}
+        {label && size >= 88 && <span className="srb-match-label">{visibleLabel}</span>}
       </div>
     </div>
   )
 }
 
-function RoleLibraryCard({ r, pct, selected, dest, chips, statusCounts, noCvSkills, saved, cmp, onCompare, onSelect, onDetails, onToggleSave }: {
+function CoverageExplain({ pct, metricLabel }: { pct: number | null; metricLabel?: string }) {
+  if (pct == null) return null
+  return (
+    <ScoreExplain
+      summary="How is this match calculated?"
+      metric={metricLabel || 'Target requirement coverage'}
+      metricKey="target_requirement_coverage"
+      numerator="sum of per-required-skill credit (0–1 each)"
+      denominator="count of the role's required skills"
+      source="GET /api/students/{id}/role-recommendations → match_score (matching.job_match_score)"
+      rounding="1 decimal (backend), then shown as a whole percent"
+      evidence="Best available evidence per skill: verified (passed Final Assessment) outranks self-reported. Adjacent-name evidence earns reduced credit."
+      included="Every required skill of this role."
+      excluded="Skills that are not requirements of this role. Required skills with no evidence earn 0 and stay in the denominator."
+      missing="Open the role details breakdown for the per-skill numerator and which requirement has no evidence."
+      reported="Only a passed Final Assessment marks a skill verified."
+    />
+  )
+}
+
+function CatalogueExplain({ pct }: { pct: number | null }) {
+  if (pct == null) return null
+  return (
+    <ScoreExplain
+      summary="How is this similarity calculated?"
+      metric="Catalogue similarity"
+      metricKey="catalogue_similarity"
+      numerator="count of required skill names present on the profile by exact name"
+      denominator="count of the role's required skills"
+      source="Role catalogue + your self-reported/verified skill names (name overlap only)"
+      rounding="1 decimal, then shown as a whole percent"
+      evidence="Name presence only — self-reported or CV-detected. Levels and verification are ignored."
+      included="Required skill names that exactly match a skill name on your profile."
+      excluded="Skill levels, assessment evidence, and differently-worded (adjacent) skills."
+      missing="This is not a competence or verification claim and is never shown as a verified match."
+      reported="A high similarity can still include skills you have not verified; check the gap map."
+    />
+  )
+}
+
+function RoleLibraryCard({ r, pct, metricLabel, selected, dest, chips, statusCounts, noCvSkills, saved, cmp, onCompare, onSelect, onDetails, onToggleSave }: {
   r: RoleRecord
   pct: number
+  metricLabel?: string
   selected: boolean
   dest?: string
   chips?: SkillChip[]
@@ -494,8 +560,13 @@ function RoleLibraryCard({ r, pct, selected, dest, chips, statusCounts, noCvSkil
             {` · ${roleExperience(r)}`}
           </p>
         </div>
-        <MatchRing pct={noCvSkills ? null : pct} size={72} />
+        <MatchRing pct={noCvSkills ? null : pct} size={88} label={metricLabel} />
       </header>
+      {!noCvSkills && pct != null && (
+        metricLabel && /similarity/i.test(metricLabel)
+          ? <CatalogueExplain pct={pct} />
+          : <CoverageExplain pct={pct} metricLabel={metricLabel} />
+      )}
       {r.description && <p className="srb-role-desc">{r.description.length > 140 ? `${r.description.slice(0, 137)}…` : r.description}</p>}
       {noCvSkills ? (
         <div className="srb-chiprow">
@@ -527,7 +598,7 @@ function RoleLibraryCard({ r, pct, selected, dest, chips, statusCounts, noCvSkil
           </button>
         )}
         <button type="button" className="btn btn-sm srb-btn-outline" onClick={onDetails}>View details</button>
-        <button type="button" className="btn btn-sm btn-primary" onClick={onSelect} disabled={selected}>
+        <button type="button" className="btn btn-sm srb-btn-outline" onClick={onSelect} disabled={selected}>
           {selected ? '✓ Target' : 'Select as target'}
         </button>
       </footer>
@@ -580,12 +651,12 @@ function RoleDetailsModal({ role, noCvSkills, profileByName, cvSkillNames, selec
         </header>
         {role.description && <p className="srb-modal-desc">{role.description}</p>}
         <div className="srb-modal-match">
-          <MatchRing pct={noCvSkills ? null : pct} size={92} />
+          <MatchRing pct={noCvSkills ? null : pct} size={92} label="Catalogue similarity" />
           <div>
-            <p className="srb-eyebrow">Skill match</p>
+            <p className="srb-eyebrow">Catalogue similarity</p>
             {noCvSkills
               ? <p className="small muted">Upload a CV to measure your match against this role.</p>
-              : <p className="small muted">{(rows.length - learningGaps.length)} of {rows.length} required skills are on your profile. Verified skills outrank self-reported ones.</p>}
+              : <p className="small muted">{(rows.length - learningGaps.length)} of {rows.length} required skill names are on your profile. This is name overlap only — it ignores levels and is not a verification claim. Verified skills outrank self-reported ones.</p>}
           </div>
         </div>
         <div className="srb-modal-section">
@@ -627,7 +698,7 @@ function RoleDetailsModal({ role, noCvSkills, profileByName, cvSkillNames, selec
             <IconBookmark size={15} /> <span>{saved ? 'Saved' : 'Save role'}</span>
           </button>
           <button type="button" className="btn btn-sm srb-btn-outline" onClick={onClose}>Close</button>
-          <button type="button" className="btn btn-sm btn-primary" onClick={onSelect} disabled={selected || busy}>
+          <button type="button" className="btn btn-sm srb-btn-outline" onClick={onSelect} disabled={selected || busy}>
             {selected ? '✓ Target Career' : busy ? 'Selecting…' : 'Select as target'}
           </button>
         </footer>
@@ -767,9 +838,9 @@ function RoleDetailsDrawer({ role, others, match, noCvSkills, profileByName, evi
         )}
         {role.description && <p className="rd-drawer-desc">{role.description}</p>}
         <div className="srb-modal-match">
-          <MatchRing pct={noCvSkills ? null : (match.pct ?? null)} size={92} />
+          <MatchRing pct={noCvSkills ? null : (match.pct ?? null)} size={92} label={match.metricLabel || 'Requirement coverage'} />
           <div>
-            <p className="srb-eyebrow">Skill match</p>
+            <p className="srb-eyebrow">{match.metricLabel || 'Requirement coverage'}</p>
             {noCvSkills
               ? <p className="small muted">Upload a CV to measure your match against this role.</p>
               : <>
@@ -778,6 +849,11 @@ function RoleDetailsDrawer({ role, others, match, noCvSkills, profileByName, evi
                 </>}
           </div>
         </div>
+        {!noCvSkills && match.pct != null && (
+          match.metric === 'catalogue_similarity'
+            ? <CatalogueExplain pct={match.pct} />
+            : <CoverageExplain pct={match.pct} metricLabel={match.metricLabel} />
+        )}
         {hasKinds ? skillList('Essential skills', essRows) : skillList('Required skills', rows)}
         {hasKinds && optRows.length > 0 && skillList('Optional skills', optRows)}
         {!noCvSkills && learningGaps.length > 0 && (
@@ -902,7 +978,7 @@ function RoleDetailsDrawer({ role, others, match, noCvSkills, profileByName, evi
             <IconCompare size={15} /> <span>{inCompare ? 'In compare' : 'Compare'}</span>
           </button>
           <button type="button" className="btn btn-sm srb-btn-outline" onClick={onClose}>Close</button>
-          <button type="button" className="btn btn-sm btn-primary" onClick={onSelect} disabled={selected || busy}>
+          <button type="button" className="btn btn-sm srb-btn-outline" onClick={onSelect} disabled={selected || busy}>
             {selected ? '✓ Target Career' : busy ? 'Selecting…' : 'Select as target'}
           </button>
         </footer>
@@ -1091,7 +1167,7 @@ function CompareModal({ roles, matches, profileByName, evidence, scenarioNoteFor
                   onClick={() => firstGap?.skill_id && onLearn(firstGap.skill_id)} disabled={!firstGap?.skill_id}>
                   Start learning
                 </button>
-                <button type="button" className="btn btn-sm btn-primary" onClick={() => onSelect(r)} disabled={busy}>
+                <button type="button" className="btn btn-sm srb-btn-outline" onClick={() => onSelect(r)} disabled={busy}>
                   Select as target
                 </button>
               </div>
@@ -1380,9 +1456,15 @@ function StudentBrowse({ student, analysis, onNavigate, backTo }: { student?: St
   // reference roles are demoted to their own labelled secondary section.
   const realRecs = (recs?.recommendations || []).filter((r) => r.source !== 'catalog')
 
-  const targetPct = cvSkillNames.length > 0 && (currentTarget?.required_skills.length ?? 0) > 0
-    ? Math.round((currentTarget!.required_skills.reduce((n, s) => n + (cvSkillNames.includes(s.name.toLowerCase().trim()) ? 1 : 0), 0) / currentTarget!.required_skills.length) * 100)
-    : null
+  // Data truth (Phase 2): the target-role number comes from the backend's
+  // canonical `target_requirement_coverage` metric. It is never recomputed here
+  // from raw skill-name overlap, which ignored levels and could show 100% while
+  // a requirement gap (e.g. Docker) was still open.
+  const targetCoverage = analysis?.metrics?.target_requirement_coverage ?? analysis?.match_score ?? null
+  const targetPct = targetCoverage === null ? null : Math.round(targetCoverage)
+  const targetComplete = analysis?.all_requirements_met === true
+  const targetOpenGaps = analysis?.missing_requirements?.length
+    ?? (analysis?.skill_gaps || []).filter((g) => g.status !== 'strong').length
 
   // Phase 2: a single match source (backend recomputation whenever available)
   // and display-level deduplication across sources — records are never deleted.
@@ -1707,6 +1789,16 @@ function StudentBrowse({ student, analysis, onNavigate, backTo }: { student?: St
 
   return (
     <div className="skills-page sro3-page">
+      <MiniTourBanner
+        page="roles"
+        eyebrow="Skills & Roles · First time here?"
+        title="Pick a destination, then build from it"
+        points={[
+          'Your target role sets the destination that your learning plan builds toward.',
+          'Coverage shows how your current skills already meet the role’s requirements.',
+          'Browse the catalog to compare other roles before you commit.',
+        ]}
+      />
       {backTo && (
         <nav className="crumbs" aria-label="Breadcrumbs">
           <button type="button" className="crumb-back" onClick={() => onNavigate?.(backTo.key)}>
@@ -1718,15 +1810,23 @@ function StudentBrowse({ student, analysis, onNavigate, backTo }: { student?: St
         <div className="sro3-hero-copy">
           <p className="sro3-eyebrow">Find your next role</p>
           <h1 className="sro3-hero-title">Choose the role your learning path should serve.</h1>
-          <p className="sro3-hero-sub">Your CV profile, verified skills, and target role stay separate so the match score remains explainable. Search the library, filter by where you want to work, and compare roles before committing.</p>
+          <p className="sro3-hero-sub">Explore roles that fit your profile, compare the strongest options, then choose one to shape your learning path.</p>
+          {!currentTarget && (
+            <button type="button" className="btn sro3-hero-cta" onClick={() => {
+              if (tab !== 'all') setTab('all')
+              requestAnimationFrame(() => document.getElementById('role-library')?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+            }}>
+              <IconTarget size={15} /> Choose a target role
+            </button>
+          )}
         </div>
       </section>
 
       <section className="srb-summary" aria-label="Career summary">
-        <div className="srb-card srb-target-card">
+        <div className="srb-card srb-target-card hcard-action">
           <div className="srb-card-head">
             <span className="srb-eyebrow">Your target career</span>
-            <MatchRing pct={targetPct} size={96} label="match" />
+            <MatchRing pct={targetPct} size={96} label="requirement coverage" />
           </div>
           <h3 className="srb-target-title">{currentTarget?.title || 'Not selected yet'}</h3>
           <p className="srb-target-meta">
@@ -1739,7 +1839,7 @@ function StudentBrowse({ student, analysis, onNavigate, backTo }: { student?: St
             Browse roles
           </button>
         </div>
-        <div className="srb-card srb-profile-card">
+        <div className="srb-card srb-profile-card hcard-info">
           <div className="srb-card-head">
             <span className="srb-eyebrow">Profile &amp; CV</span>
             <label className="btn btn-sm srb-btn-outline" style={{ cursor: 'pointer' }}>
@@ -1825,9 +1925,12 @@ function StudentBrowse({ student, analysis, onNavigate, backTo }: { student?: St
             <div>
               <p className="srb-eyebrow">Reference roles — local catalogue</p>
               <h3>Careers you can aim at</h3>
-              <p className="card-sub">SkillBridge reference skill profiles — not live job postings. Only roles that share skills with your profile are shown, so nothing irrelevant gets in the way.</p>
+              <p className="card-sub">The closest reference roles to your current profile. These are career profiles, not live job postings.</p>
             </div>
-            <span className="srb-count">{refRoles.length} role{refRoles.length === 1 ? '' : 's'}</span>
+            <div className="srb-ref-heading-actions">
+              <span className="srb-count">Top {Math.min(refRoles.length, 4)} of {refRoles.length}</span>
+              {refRoles.length > 4 && <button type="button" className="btn btn-sm srb-btn-outline" onClick={() => setTab('all')}>View all roles</button>}
+            </div>
           </div>
           {refRoles.length === 0 ? (
             <div className="empty">
@@ -1835,7 +1938,7 @@ function StudentBrowse({ student, analysis, onNavigate, backTo }: { student?: St
             </div>
           ) : (
           <div className="srb-ref-row">
-            {refRoles.map((r) => {
+            {refRoles.slice(0, 4).map((r) => {
               const present = r.required_skills.reduce((n, s) => n + (cvSkillNames.includes(s.name.toLowerCase().trim()) ? 1 : 0), 0)
               const gapNames = r.required_skills.filter((s) => !cvSkillNames.includes(s.name.toLowerCase().trim())).slice(0, 3).map((s) => s.name)
               const isTarget = selectedRole === r.id || student?.target_role_id === r.id
@@ -1843,7 +1946,7 @@ function StudentBrowse({ student, analysis, onNavigate, backTo }: { student?: St
                 <article className="srb-ref-card" key={r.id}>
                   <div className="srb-ref-top">
                     <span className="chip chip-catalog">Catalog</span>
-                    <MatchRing pct={matchPctOf(r, cvSkillNames)} size={70} />
+                    <MatchRing pct={matchPctOf(r, cvSkillNames)} size={88} label="catalogue similarity" />
                   </div>
                   <h4 className="srb-ref-title">{r.title}</h4>
                   <p className="srb-ref-gap">
@@ -1864,7 +1967,7 @@ function StudentBrowse({ student, analysis, onNavigate, backTo }: { student?: St
                     </button>
                     <button
                       type="button"
-                      className={`btn btn-sm ${isTarget ? '' : 'btn-primary'}`}
+                      className="btn btn-sm srb-btn-outline"
                       disabled={isTarget}
                       onClick={() => chooseTarget(r.id)}
                     >
@@ -2011,6 +2114,7 @@ function StudentBrowse({ student, analysis, onNavigate, backTo }: { student?: St
                     <RoleLibraryCard
                       r={r}
                       pct={displayMatch(r).pct ?? 0}
+                      metricLabel={displayMatch(r).metricLabel}
                       selected={selectedRole === r.id}
                       dest={catalog.some((c) => c.id === r.id) ? 'catalog' : undefined}
                       chips={noCvSkills ? undefined : statusBySkill.map(({ s, status }) => ({ name: s.name, level: s.required_level, matched: status !== 'missing' }))}
@@ -2068,6 +2172,7 @@ function StudentBrowse({ student, analysis, onNavigate, backTo }: { student?: St
                     key={r.id}
                     r={r}
                     pct={displayMatch(r).pct ?? 0}
+                    metricLabel={displayMatch(r).metricLabel}
                     selected={selectedRole === r.id}
                     dest={catalog.some((c) => c.id === r.id) ? 'catalog' : undefined}
                     chips={noCvSkills ? undefined : statusBySkill.map(({ s, status }) => ({ name: s.name, level: s.required_level, matched: status !== 'missing' }))}
@@ -2186,7 +2291,7 @@ function StudentBrowse({ student, analysis, onNavigate, backTo }: { student?: St
                     {o.skills.length > 5 && <span className="muted small">+{o.skills.length - 5} more</span>}
                   </div>
                   <button
-                    className={`btn btn-sm ${student?.target_role?.external_id === o.uri ? '' : 'btn-primary'}`}
+                    className="btn btn-sm srb-btn-outline"
                     style={{ alignSelf: 'flex-end', whiteSpace: 'nowrap' }}
                     disabled={student?.target_role?.external_id === o.uri || marketSelecting === o.uri}
                     onClick={() => selectMarketTarget(o)}
@@ -2271,12 +2376,21 @@ function StudentBrowse({ student, analysis, onNavigate, backTo }: { student?: St
         <div className="sro3-gap-head">
           <div className="sro3-gap-icon"><IconTarget size={16} /></div>
           <div>
-            <p className="sro3-eyebrow">Career readiness</p>
+            <p className="sro3-eyebrow">Target requirement coverage</p>
             <h3>Your {currentTarget?.title || 'target'} skill gap</h3>
-            {targetPct !== null && <p className="sro3-gap-sub">You already match {targetPct}% of this role's requirements.</p>}
+            {targetPct !== null && (
+              <p className="sro3-gap-sub">
+                Your evidence currently covers <strong>{targetPct}%</strong> of this role&apos;s
+                {' '}requirements
+                {targetComplete
+                  ? ' — all requirements are currently met (level-aware; verify to make it official).'
+                  : `, with ${targetOpenGaps} requirement${targetOpenGaps === 1 ? '' : 's'} still open.`}
+              </p>
+            )}
             {targetPct === null && <p className="sro3-gap-sub">{noCvSkills ? 'Upload a CV so matching can begin.' : 'Pick a target career to see your gap map.'}</p>}
           </div>
         </div>
+        <CoverageExplain pct={targetPct} metricLabel="Requirement coverage" />
         {analysis && analysis.skill_gaps && analysis.skill_gaps.length > 0 ? (
           <div className="sro3-gap-list">
             {analysis.skill_gaps.map((g) => (

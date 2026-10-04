@@ -216,6 +216,9 @@ export interface SkillGap {
   student_level: string | null
   status: 'strong' | 'gap' | 'missing'
   verified: boolean
+  /** Where the skill lives in the student's profile: 'claim' = self-reported,
+   *  'verified' = officially verified. Absent for role-required skill gaps. */
+  profileSource?: 'claim' | 'verified'
 }
 
 export interface BadgeInfo {
@@ -241,6 +244,27 @@ export interface ActivitySummary {
   leaderboard: { status: string; message?: string }
 }
 
+// Canonical score registry. One key = one metric = one name/formula/value across
+// every page. `target_requirement_coverage` is the level-aware, partial-credit
+// metric (the Dashboard ring). `career_readiness` is the stricter all-or-nothing
+// share. `verified_evidence_coverage` counts only passed Final Assessments.
+// `catalogue_similarity` is name-overlap only and is never a competence claim.
+export type CanonicalMetricKey =
+  | 'target_requirement_coverage'
+  | 'career_readiness'
+  | 'verified_evidence_coverage'
+  | 'catalogue_similarity'
+
+export interface MetricDefinition {
+  key: CanonicalMetricKey
+  label: string
+  short_label: string
+  formula: string
+  evidence: string
+  rounding: string
+  complete_when: string
+}
+
 export interface Analysis {
   student_id: number
   role_id: number
@@ -249,6 +273,10 @@ export interface Analysis {
   match_score: number
   skill_gaps: SkillGap[]
   gap_count: number
+  metrics?: Partial<Record<CanonicalMetricKey, number>>
+  metric_definitions?: Partial<Record<CanonicalMetricKey, MetricDefinition>>
+  all_requirements_met?: boolean
+  missing_requirements?: string[]
 }
 
 export interface LearningResource {
@@ -532,7 +560,7 @@ export interface RecentJob {
   seniority?: string
   match_pct?: number
   match_reason?: string
-  location_tier?: 'city' | 'country' | 'country_remote' | 'global_remote' | 'unknown' | 'different'
+  location_tier?: 'city' | 'country' | 'country_remote' | 'market' | 'global_remote' | 'unknown' | 'different'
   location_label?: string
   is_expired?: boolean
   expires_at?: string
@@ -548,6 +576,8 @@ export interface RecentJob {
   fetched_at?: string
   link_state?: string
   link_reason?: string
+  link_checked?: boolean
+  apply_safe?: boolean
   provenance?: Record<string, { value?: unknown; basis?: string }>
 }
 
@@ -564,7 +594,9 @@ export interface ProviderReport {
 
 export interface RecentJobsResponse {
   source: 'live' | 'empty' | 'unavailable' | 'no-cv'
+  checked_at?: string
   jobs: RecentJob[]
+  provider_jobs?: Record<string, RecentJob[]>
   groups?: { local_count: number; broader_count: number; other_count: number }
   providers?: ProviderReport[]
   status?: 'fresh' | 'cached' | 'stale_fallback' | 'unavailable'
@@ -731,6 +763,8 @@ export interface TargetRoleRequirement {
   student_level: string | null
   status: string
   evidence: 'verified' | 'self_reported' | 'none'
+  matched_by?: 'id' | 'name_exact' | 'name_adjacent' | null
+  matched_skill?: string | null
   contribution_points: number
   max_points: number
 }
@@ -887,6 +921,22 @@ export interface CareerRoadmap {
   phases: CareerRoadmapPhase[]
 }
 
+export interface RoadmapViolation {
+  check_name: string
+  passed: boolean
+  evidence: string
+  suggested_fix: string
+}
+
+export interface RoadmapValidation {
+  coverage_score: number
+  personalization_score: number
+  violations: RoadmapViolation[]
+  sources?: string[]
+  source?: 'live' | 'fallback'
+  error?: string
+}
+
 // ------------------------------------------------------------------ learning diagnostic
 
 export type DiagnosticQuestionType = 'mcq' | 'free_text'
@@ -961,14 +1011,17 @@ export interface PersonalizedPath {
   student_id: number
   skill_id: number
   diagnostic_id: number
+  // A path belongs to one diagnostic. When a newer completed diagnostic exists
+  // the path is "stale": its gaps must not override the newer diagnostic, and
+  // the UI must label it rather than silently showing old advice as current.
+  latest_diagnostic_id?: number | null
+  stale?: boolean
   required_level: string
   items: PersonalizedPathItem[]
   stages: PersonalizedStage[]
   skipped_mastered: string[]
   progress: string[]
   created_at: string
-  latest_diagnostic_id?: number | null
-  stale?: boolean | null
 }
 
 export type PersonalizedPathResponse = PersonalizedPath | { diagnostic_required: true; path: null }
@@ -985,6 +1038,8 @@ export interface FinalAssessmentStatus {
   required_level: string
   diagnostic_completed: boolean
   path_exists: boolean
+  path_stale?: boolean
+  latest_diagnostic_id?: number | null
   has_blueprint: boolean
   readiness: FinalAssessmentReadiness
 }
@@ -998,7 +1053,6 @@ export interface LessonQuestion {
   explanation?: string
   competency?: string
   difficulty?: string
-  misconception_hint?: string
 }
 
 export interface LessonGroundingSource {
@@ -1036,17 +1090,6 @@ export interface LessonPractice {
   response_type?: string
   competency?: string
   questions?: LessonQuestion[]
-  starter_code?: string
-  language?: string
-  evaluation_note?: string
-  automated_tests?: { input: unknown[]; expected: unknown }[]
-}
-
-export interface CanonicalLessonMetadata {
-  source: string
-  version: string
-  prerequisites: { competency: string; relationship: string; why: string }[]
-  roadmap_rationale: string
 }
 
 export interface LessonContent {
@@ -1055,16 +1098,7 @@ export interface LessonContent {
   practice: LessonPractice
   resources?: LearningResource[] | null
   mini_check: { questions: LessonQuestion[] }
-  /** Reviewed display translations; scoring still uses the canonical questions. */
-  locales?: Partial<Record<'ar', {
-    learn?: LessonSection
-    example?: LessonSection
-    practice?: LessonPractice
-    /** Display-only translations keyed by the immutable canonical question id. */
-    mini_check?: { questions: Array<Partial<LessonQuestion> & { id: string }> }
-  }>>
   self_check?: LessonSelfCheck
-  canonical?: CanonicalLessonMetadata
 }
 
 export interface MiniCheckResult {
@@ -1088,12 +1122,24 @@ export interface PracticeTaskQuestion {
   difficulty?: string
 }
 
+/**
+ * Non-executing structural review of a submitted practice answer. It never runs
+ * the code, never changes the practice score and never verifies a skill — it only
+ * reports whether the expected structure is present so the learning agent may
+ * offer a Mini Check.
+ */
+export interface PracticeStaticCheck {
+  status: 'looks_structurally_sound' | 'needs_fix'
+  note: string
+  checks: string[]
+}
+
 export interface PracticeTask {
   source: PracticeTaskSource
   source_attempt_id: number | null
   type: string
   questions: PracticeTaskQuestion[]
-  static_check?: { kind?: 'sql_text' | string; status: 'looks_structurally_sound' | 'needs_fix'; checks: string[]; note: string } | null
+  static_check?: PracticeStaticCheck | null
 }
 
 export interface RemediationReview {
@@ -1146,14 +1192,33 @@ export interface Lesson {
   completed_at: string | null
 }
 
-export type LearningAgentActionType = 'EXPLAIN' | 'PRACTICE' | 'GIVE_HINT' | 'REVIEW_PREREQUISITE' | 'MINI_CHECK' | 'ADVANCE' | 'REQUEST_REASSESSMENT'
+// ------------------------------------------------------------------ learning agent
+
+/**
+ * Observable next-step vocabulary of the learning orchestrator. A decision is
+ * evidence, never a grade: it can never complete a topic or verify a skill.
+ */
+export type LearningAgentActionType =
+  | 'EXPLAIN'
+  | 'PRACTICE'
+  | 'GIVE_HINT'
+  | 'REVIEW_PREREQUISITE'
+  | 'MINI_CHECK'
+  | 'ADVANCE'
+  | 'REQUEST_REASSESSMENT'
+
+export interface LearningAgentEvidence {
+  kind: string
+  detail: string
+}
+
 export interface LearningAgentDecision {
   action_type: LearningAgentActionType
   topic_id: string | null
-  objective: string
-  evidence: { kind: string; detail: string }[]
+  evidence: LearningAgentEvidence[]
   decision_reason: string
   next_step: string
+  objective: string
 }
 
 // ------------------------------------------------------------------ global AI copilot context
@@ -1230,6 +1295,37 @@ export interface CopilotOnboardingResponse {
   answered_at: string | null
   copilot: CopilotConfigRecord
   options: CopilotOption[]
+}
+
+export type TourWelcomeState = 'not_seen' | 'active' | 'completed' | 'skipped'
+export type TourMiniState = 'not_seen' | 'completed'
+export type TourMiniPage = 'roles' | 'learning' | 'assessments'
+
+export interface StudentTourState {
+  student_id: number
+  tour_version: string
+  welcome_state: TourWelcomeState
+  dont_show_again: boolean
+  mini_states: Partial<Record<TourMiniPage, TourMiniState>>
+  updated_at: string | null
+  default?: boolean
+}
+
+export interface TourStateUpdate {
+  welcome_state?: TourWelcomeState
+  dont_show_again?: boolean
+  mini_states?: Partial<Record<TourMiniPage, TourMiniState>>
+}
+
+export interface MentorUiState {
+  student_id: number
+  panel_visible: boolean
+  updated_at: string | null
+  default?: boolean
+}
+
+export interface MentorUiUpdate {
+  panel_visible: boolean
 }
 
 export interface CopilotConfigResponse {

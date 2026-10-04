@@ -14,11 +14,13 @@ centralized threshold) may mark a lesson topic complete in the personalized path
 import json
 import random
 import re
+from copy import deepcopy
 
 from . import diagnostics as dx
 from . import genai
-from . import resources as resource_catalog
 from . import knowledge_base
+from . import lesson_selfcheck
+from . import resources as resource_catalog
 
 
 MINI_CHECK_PASS_THRESHOLD = 0.7
@@ -141,7 +143,7 @@ def _normalize_question(q, i, prefix, competency):
 
 
 _PRACTICAL_RESPONSE_TYPES = {
-    "code", "command", "query", "scenario", "dialogue", "analysis",
+    "code", "command", "query", "sql", "scenario", "dialogue", "analysis",
     "explanation", "code_explanation", "scenario_response", "communication",
     "decision", "write_response", "short_answer", "debug",
     "troubleshooting", "configuration", "implementation_plan",
@@ -237,8 +239,13 @@ def canonical_practice(practice_data, competency, default_title=None, prefer_typ
         response_type = "explanation"
     if not comp:
         comp = human
-    canonical = {
+    # Curated lessons may additionally provide a safe reference shape for a
+    # *text-only* static review (for example SQL or Git commands).  Keep only
+    # explicit display/review metadata here: normalisation must not erase it,
+    # but it must also not turn it into executable code or an answer key.
+    result = {
         "type": "practical",
+        "id": "p1",
         "title": title or default_title or f"Apply {human}",
         "task": task,
         "response_type": response_type,
@@ -253,21 +260,11 @@ def canonical_practice(practice_data, competency, default_title=None, prefer_typ
             "difficulty": "intermediate",
         }],
     }
-    # Optional, declarative coding-task details are safe to carry through the
-    # legacy practice normalizer. They are displayed to the learner; execution
-    # remains outside the web server.
-    if data.get("starter_code"):
-        canonical["starter_code"] = str(data["starter_code"])
-    if data.get("language"):
-        canonical["language"] = str(data["language"])
-    if data.get("evaluation_note"):
-        canonical["evaluation_note"] = str(data["evaluation_note"])
-    if isinstance(data.get("automated_tests"), list):
-        canonical["automated_tests"] = [
-            {"input": list(case.get("input") or []), "expected": case.get("expected")}
-            for case in data["automated_tests"] if isinstance(case, dict)
-        ]
-    return canonical
+    for key in ("language", "starter_code", "evaluation_note"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            result[key] = value
+    return result
 
 
 def normalize_lesson_practice(lesson, competency):
@@ -377,8 +374,10 @@ def _grounding_sources(skill_name, skill_category, competency, required_level, t
         url = str(r.get("url") or "").strip()
         title = str(r.get("title") or "").strip()
         if url and title:
+            excerpt = str(r.get("reason") or r.get("helpfulness") or "").strip()
             out.append({"title": title, "url": url,
-                        "source": str(r.get("source") or "curated")})
+                        "source": str(r.get("source") or "curated"),
+                        "excerpt": excerpt})
         if len(out) >= 4:
             break
     return out
@@ -398,6 +397,7 @@ def _grounding_sources_from_model(model_value, trusted):
             "title": str(t.get("title") or ""),
             "url": str(t.get("url") or ""),
             "source": str(t.get("source") or "curated"),
+            "excerpt": str(t.get("excerpt") or ""),
         }
     if isinstance(model_value, list):
         for s in model_value:
@@ -409,6 +409,7 @@ def _grounding_sources_from_model(model_value, trusted):
                     "title": str(s.get("title") or merged[url]["title"]),
                     "url": url,
                     "source": str(s.get("source") or "curated"),
+                    "excerpt": str(s.get("excerpt") or merged[url]["excerpt"]),
                 }
     return list(merged.values())[:4]
 
@@ -483,6 +484,84 @@ def _self_check_lesson(content, skill_name, competency, target_role, action):
     return {"passed": passed_all, "checks": checks, "flags": flags}
 
 
+def _catalog_url_set(skill_name, skill_category, competency, required_level, target_role):
+    """Curated-catalog URL set for a competency (used by the structure self-check)."""
+    urls = set()
+    for s in _grounding_sources(skill_name, skill_category, competency, required_level, target_role):
+        url = str(s.get("url") or "").strip()
+        if url:
+            urls.add(url)
+    return urls
+
+
+def _practice_task_id(content):
+    """Persisted id/title of the lesson's Practice task for the worked-example reference."""
+    practice = (content or {}).get("practice") if isinstance(content, dict) else {}
+    if isinstance(practice, dict):
+        return str(practice.get("id") or practice.get("title") or "").strip()
+    return ""
+
+
+def repair_lesson_structure(content, skill_name, skill_category, competency,
+                            required_level, target_role, action, topic_status,
+                            diagnostic_score):
+    """Deterministic 5-part repair after generation (WP-GO-05).
+
+    Reuses the fallback templates to fill any missing section, re-runs the pure
+    self-check, and records the outcome. Returns (repaired_content, repair_report)
+    where repair_report = {"passed": bool, "repaired": [...], "problems": [...]}.
+    Never rewrites persisted JSON — this runs on freshly generated content only.
+    """
+    if not isinstance(content, dict):
+        content = {}
+    fallback = _lesson_fallback(skill_name, competency, action, topic_status,
+                                diagnostic_score, required_level, target_role)
+    catalog_urls = _catalog_url_set(skill_name, skill_category, competency,
+                                    required_level, target_role)
+    task_id = _practice_task_id(content) or _practice_task_id(fallback)
+
+    def run_check():
+        return lesson_selfcheck.self_check_lesson(content, catalog_urls, task_id)
+
+    repaired = []
+    problems = run_check()
+    learn = content.setdefault("learn", {})
+    if not isinstance(learn, dict):
+        learn = {}
+        content["learn"] = learn
+
+    for field in ("explanation", "key_ideas", "key_terms", "common_mistake", "worked_example"):
+        if not str(lesson_selfcheck._text(learn.get(field) or "")).strip():
+            fallback_learn = fallback.get("learn") or {}
+            if field in fallback_learn:
+                learn[field] = fallback_learn[field]
+                repaired.append(field)
+
+    # If the worked example exists but does not reference the next Practice task,
+    # append a deterministic reference (same technique, different values).
+    practice_title = str((content.get("practice") or {}).get("title") or "").strip()
+    worked_example = str(learn.get("worked_example") or "").strip()
+    if worked_example and practice_title:
+        lower = worked_example.lower()
+        if not (task_id and task_id.lower() in lower) and practice_title.lower() not in lower:
+            learn["worked_example"] = (
+                f"{worked_example} This is the setup for the next Practice task "
+                f"({practice_title}) — redo the same technique on different values."
+            )
+            repaired.append("worked_example_practice_reference")
+
+    if not content.get("resources"):
+        content["resources"] = fallback.get("resources") or []
+
+    problems = run_check()
+    report = {
+        "passed": not problems,
+        "repaired": repaired,
+        "problems": problems,
+    }
+    return content, report
+
+
 def _is_coding_skill(skill_name):
     low = str(skill_name or "").lower()
     return any(h in low for h in _CODE_SKILL_HINTS)
@@ -498,26 +577,6 @@ def normalize_lesson(lesson, competency, skill_name=None, skill_category=None,
     """
     if not isinstance(lesson, dict) or not isinstance(lesson.get("content"), dict):
         return lesson
-    # A previously persisted generated lesson can contain fallback template
-    # prose. Serve a reviewed replacement for a complete trusted topic unless
-    # it already has a scored Mini Check (whose stored answers must stay
-    # traceable to the content the learner answered).
-    curated = knowledge_base.complete_lesson(skill_name, competency) if skill_name else None
-    if curated and not lesson.get("mini_check_result"):
-        lesson = dict(lesson)
-        lesson["content"] = {
-            "learn": curated["learn"],
-            "example": curated["example"],
-            "practice": canonical_practice(curated["practice"], competency, prefer_type="code"),
-            "mini_check": curated["mini_check"],
-            "locales": curated.get("locales", {}),
-            "canonical": {
-                "source": "trusted_cs_knowledge_base",
-                "version": knowledge_base.KNOWLEDGE_BASE_VERSION,
-                "prerequisites": curated["prerequisites"],
-                "roadmap_rationale": curated["roadmap_rationale"],
-            },
-        }
     normalized = normalize_lesson_practice(lesson, competency)
     content = normalized["content"]
     content = dict(content)
@@ -540,8 +599,42 @@ def normalize_lesson(lesson, competency, skill_name=None, skill_category=None,
     if skill_name:
         content["resources"] = _lesson_resources(
             skill_name, skill_category, competency, required_level, target_role)
+    # Invariant 9: old persisted lessons (missing parts) keep rendering. Fill any
+    # missing 5-part sections from safe defaults at read time; never rewrite JSON.
+    content = _normalize_lesson_structure(
+        content, competency, skill_name, skill_category, required_level, target_role)
     normalized["content"] = content
     return normalized
+
+
+def _normalize_lesson_structure(content, competency, skill_name, skill_category,
+                                required_level, target_role):
+    """Read-time 5-part fill for old/partial persisted lessons (no DB write)."""
+    content = dict(content or {})
+    learn = dict(content.get("learn") or {})
+    if not isinstance(learn, dict):
+        learn = {}
+    fallback = _lesson_fallback(
+        skill_name or "Skill", competency, "learn", "weak", 0.0,
+        required_level, target_role)
+    fallback_learn = fallback.get("learn") or {}
+    for field in ("explanation", "key_ideas", "key_terms", "common_mistake", "worked_example"):
+        if not str(lesson_selfcheck._text(learn.get(field) or "")).strip():
+            if field in fallback_learn:
+                learn[field] = fallback_learn[field]
+    if not str(learn.get("job_relevance") or "").strip():
+        learn["job_relevance"] = fallback_learn.get("job_relevance", "")
+    learn.setdefault("title", fallback_learn.get("title", ""))
+    content["learn"] = learn
+    if not content.get("resources"):
+        content["resources"] = fallback.get("resources") or []
+    if not isinstance(content.get("example"), dict):
+        content["example"] = fallback.get("example") or {}
+    if not isinstance(content.get("practice"), dict):
+        content["practice"] = fallback.get("practice") or {}
+    if not isinstance(content.get("mini_check"), dict) or not content["mini_check"].get("questions"):
+        content["mini_check"] = fallback.get("mini_check") or {}
+    return content
 
 
 def _lesson_fallback(skill_name, competency, action, topic_status, diagnostic_score,
@@ -568,17 +661,18 @@ def _lesson_fallback(skill_name, competency, action, topic_status, diagnostic_sc
             f"You already have a working foundation in **{human}** for **{skill_name}**, but the "
             f"diagnostic showed some gaps. This is a focused review that sharpens the pieces you "
             f"may have missed and solidifies how {human.lower()} behaves under real, production-shaped "
-            f"conditions (targeted at {required} level work). {depth_note}"
+            f"conditions (targeted at {required} level work for a {role}). {depth_note}"
         )
         key_ideas = [
             f"Confirm the core mechanics of {human} in {skill_name}.",
             f"Revisit the pitfalls that commonly trip up practitioners at the {required} level.",
             f"Reinforce how {human} applies to a real deliverable for a {role}.",
+            f"Debug edge cases of {human} the way a {role} would on the job.",
         ]
         key_terms = {
             "pitfall": f"A common mistake that creeps in when applying {human} without care.",
             "best practice": f"The recommended, reliable way to use {human} in production {skill_name}.",
-            "context": f"The constraints of the real task that shape how {human} is used.",
+            "context": f"The constraints of the real task that shape how {human} is used by a {role}.",
         }
     else:
         depth_note = (
@@ -588,14 +682,14 @@ def _lesson_fallback(skill_name, competency, action, topic_status, diagnostic_sc
         explanation = (
             f"**{human}** is one of the building blocks of **{skill_name}**. It is the part of the "
             f"skill you will reach for whenever you need to {human.lower()} in a real task — for "
-            f"example, working at a {required} level on an actual project. This lesson builds it up "
+            f"example, working as a {role} at a {required} level on an actual project. This lesson builds it up "
             f"from the ground so you understand not just the syntax or commands, but why it works. "
             f"{depth_note}"
         )
         key_ideas = [
             f"What {human} is and the problem it solves in {skill_name}.",
             f"How {human} fits together with the rest of {skill_name}.",
-            f"The concrete steps to apply {human} in a real task.",
+            f"The concrete steps to apply {human} in a real task for a {role}.",
             f"Common mistakes to avoid when first using {human}.",
         ]
         key_terms = {
@@ -613,13 +707,14 @@ def _lesson_fallback(skill_name, competency, action, topic_status, diagnostic_sc
     common_mistake = (
         f"A common beginner mistake with {human} is assuming the syntax or a command is "
         f"correct without validating it against the actual tooling — interviewers and engineers "
-        f"probe for whether you can state how you know something worked."
+        f"probe for whether you can state how you know something worked. As a {role}, you will be "
+        f"expected to verify your work, not just produce a plausible answer."
     )
 
     worked_example = (
         f"Worked example tied to the practice to come: walk through one concrete {skill_name} "
-        f"case where you apply **{human}** at {required} level — name the action you take, the "
-        f"expected result, and how you would confirm it worked or debug it if it did not."
+        f"case where you, as a {role}, apply **{human}** at {required} level — name the action you "
+        f"take, the expected result, and how you would confirm it worked or debug it if it did not."
     )
 
     example = {
@@ -662,6 +757,37 @@ def _lesson_fallback(skill_name, competency, action, topic_status, diagnostic_sc
     }
 
 
+def _canonical_lesson_content(topic, skill_name, skill_category, target_role,
+                              action, required_level):
+    """Build lesson content from authored knowledge-base content.
+
+    Curated topics are served verbatim and are NEVER regenerated by an LLM, even
+    when a provider is configured.  Everything the lesson, practice, Mini Check,
+    and static-check paths rely on is carried through, plus an explicit
+    provenance block so callers can prove the content is trusted, not generated.
+    """
+    content = {
+        "learn": deepcopy(topic["learn"]),
+        "example": deepcopy(topic["example"]),
+        "practice": deepcopy(topic["practice"]),
+        "mini_check": deepcopy(topic["mini_check"]),
+        "locales": deepcopy(topic.get("locales") or {}),
+        "canonical": {
+            "source": "trusted_cs_knowledge_base",
+            "version": knowledge_base.KNOWLEDGE_BASE_VERSION,
+            "competency": topic["competency"],
+            "objective": topic["objective"],
+            "prerequisites": deepcopy(topic.get("prerequisites") or []),
+            "roadmap_rationale": topic.get("roadmap_rationale"),
+        },
+    }
+    content["self_check"] = _self_check_lesson(
+        content, skill_name, topic["competency"], target_role, action)
+    content["resources"] = _lesson_resources(
+        skill_name, skill_category, topic["competency"], required_level, target_role)
+    return content
+
+
 def generate_lesson(skill_name, competency, action, topic_status=None,
                     diagnostic_score=None, target_role=None, required_level=None,
                     student_context=None, skill_category=None):
@@ -670,27 +796,12 @@ def generate_lesson(skill_name, competency, action, topic_status=None,
     human = _lesson_human(competency)
     required = required_level or "Intermediate"
 
-    # Canonical CS entries are always served verbatim. This intentionally runs
-    # before the provider check so a configured LLM can never invent curriculum
-    # facts, prerequisites, examples, or Mini Check answers for this topic.
-    canonical = knowledge_base.complete_lesson(skill_name, human)
-    if canonical:
-        content = {
-            "learn": canonical["learn"],
-            "example": canonical["example"],
-            "practice": canonical_practice(canonical["practice"], human, prefer_type="code"),
-            "mini_check": canonical["mini_check"],
-            "locales": canonical.get("locales", {}),
-            "canonical": {
-                "source": "trusted_cs_knowledge_base",
-                "version": knowledge_base.KNOWLEDGE_BASE_VERSION,
-                "prerequisites": canonical["prerequisites"],
-                "roadmap_rationale": canonical["roadmap_rationale"],
-            },
-        }
-        content["self_check"] = _self_check_lesson(
-            content, skill_name, human, target_role, action)
-        return content
+    # Trusted curated content is authoritative and short-circuits generation for
+    # the topics the knowledge base has actually authored (never LLM-dependent).
+    canonical_topic = knowledge_base.complete_lesson(skill_name, competency)
+    if canonical_topic:
+        return _canonical_lesson_content(
+            canonical_topic, skill_name, skill_category, target_role, action, required)
 
     def fallback():
         return _lesson_fallback(skill_name, human, action, topic_status,
@@ -706,6 +817,8 @@ def generate_lesson(skill_name, competency, action, topic_status=None,
         fb = fallback()
         fb["self_check"] = _self_check_lesson(
             fb, skill_name, human, target_role, action)
+        fb["source"] = "fallback"
+        fb["selfCheck"] = {"passed": True, "repaired": [], "problems": []}
         return attach_resources(fb)
 
     if not genai.genai_enabled():
@@ -713,12 +826,27 @@ def generate_lesson(skill_name, competency, action, topic_status=None,
 
     grounding = _grounding_sources(skill_name, skill_category, human,
                                    required, target_role)
+    band = (topic_status or "").strip().lower()
+    if band == "mastered":
+        band = "developing"
     depth_directive = (
-        "DEPTH BRANCHING (weak vs developing — make these genuinely different):\n"
-        "  - WEAK topic (mode 'learn'): start from fundamentals, add more scaffolding and worked "
-        "example detail, explicitly address the likely beginner misconception.\n"
-        "  - DEVELOPING topic (mode 'review'): skip re-explaining the basics, zoom in on the specific "
-        "gap, and move quickly toward practice. Do NOT pad with basics the student already knows.\n"
+        "DEPTH BRANCHING — branch on the student's diagnostic band (weak vs developing):\n"
+        "  - WEAK (mode 'learn'): the topic is a genuine gap. Start from the fundamentals, add "
+        "more scaffolding and worked-example detail, use plain analogies, keep steps small, define "
+        "every term explicitly, and address the likely beginner misconception first. Teach one "
+        "concept at a time.\n"
+        "  - DEVELOPING (mode 'review'): the basics are in place. Skip re-explaining the "
+        "fundamentals; zoom in on the specific gap with edge cases, tradeoffs, debugging pitfalls, "
+        "and how the concept shows up in real day-to-day work. Do NOT pad with basics the student "
+        "already knows.\n"
+    )
+    role_anchor_directive = (
+        "ROLE ANCHORING — the student's target role is '"
+        f"{target_role or 'unspecified'}"
+        "'. Every Learn section (explanation, key_ideas, key_terms, common_mistake, worked_example) "
+        "must contain at least one sentence that names this exact target role and ties the concept "
+        "to what a working professional in that role actually does with it. Never invent or accept "
+        "a different role.\n\n"
     )
     system = (
         "You are a friendly but rigorous skills coach building a SINGLE focused topic lesson "
@@ -734,12 +862,15 @@ def generate_lesson(skill_name, competency, action, topic_status=None,
         "- Any code you show must be valid/runnable. There is no execution sandbox, so be "
         "conservative: prefer well-known, stable syntax and keep code minimal and correct.\n"
         "- Treat the provided 'Trusted grounding sources' as the only allowed source of URLs/named "
-        "official resources. Do NOT attach invented links to Learn content.\n\n"
+        "official resources. Do NOT attach invented links to Learn content.\n"
+        "- Each trusted source carries a short 'excerpt' describing what it covers — use it to "
+        "ground your technical claims and stay accurate, but never copy it verbatim as lesson text.\n\n"
         "JOB-READINESS — the learner is preparing for a real junior role:\n"
         "- Anchor the concept to why it shows up in the target role, what a working professional "
         "actually does with it day-to-day, and a common mistake beginners make (interviewers probe "
         "for these). Keep this concise, not a marketing paragraph.\n\n"
         f"{depth_directive}\n"
+        f"{role_anchor_directive}"
         "LEARN CONTENT — enforce this 5-part shape (adjust wording, keep structure):\n"
         "1. What & why: the concept and why it matters for the target role (field: explanation, "
         "plus a short 'job_relevance' string naming the target role).\n"
@@ -848,8 +979,20 @@ def generate_lesson(skill_name, competency, action, topic_status=None,
         content["mini_check"] = {
             "questions": _lesson_bank_questions(skill_name, human, 2),
         }
+    # WP-GO-05: enforce the 5-part structure + pure self-check after generation.
+    # Repair deterministically from the fallback templates; any repair labels the
+    # lesson as fallback (never pretend repaired content is live AI).
     content["self_check"] = _self_check_lesson(
         content, skill_name, human, target_role, action)
+    content, repair = repair_lesson_structure(
+        content, skill_name, skill_category, human, required, target_role,
+        action, topic_status, diagnostic_score)
+    content["source"] = "fallback" if repair["repaired"] else "ai"
+    content["selfCheck"] = {
+        "passed": repair["passed"],
+        "repaired": repair["repaired"],
+        "problems": repair["problems"],
+    }
     return attach_resources(content)
 
 

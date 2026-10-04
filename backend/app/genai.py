@@ -22,7 +22,7 @@ import time
 
 import truststore
 
-from . import tts, knowledge_base
+from . import knowledge_base, tts
 
 PROVIDER = "anthropic_model"
 CLAUDE_MODEL = os.environ.get("SKILLBRIDGE_CLAUDE_MODEL", "claude-3-5-sonnet-20241022")
@@ -1002,26 +1002,6 @@ def _role_context_blurb(skill_name, target_role):
             f"fluency that maps directly to the job, not around generic tutorials.")
 
 
-_UNSUPPORTED_LEARNING_PROFILE_TERMS = (
-    "university", "college", "student background", "your profile",
-    "you already have", "your prior experience", "you have experience",
-    "you completed", "your completed", "relevant foundations",
-)
-
-
-def _without_unsupported_learning_profile_claims(value):
-    """Keep generated resource-pack copy role-aware without asserting learner facts.
-
-    The resource pack has no evidence authority for education, prior work, or
-    capability.  A provider can still ignore its prompt, so strip those claims
-    from every visible generated field rather than trusting the instruction.
-    """
-    text = str(value or "").strip()
-    kept = [sentence for sentence in re.split(r"(?<=[.!?])\s+", text)
-            if not any(term in sentence.lower() for term in _UNSUPPORTED_LEARNING_PROFILE_TERMS)]
-    return " ".join(kept).strip()
-
-
 def _deterministic_modules(skill_name, target_role, from_level, to_level, required):
     """Build modules strictly from the required competency list — coverage is
     guaranteed by construction.
@@ -1471,7 +1451,8 @@ def _merge_ai_and_curated_resources(ai_resources, curated_resources, skill_name=
     return merged or [dict(r) for r in curated_resources]
 
 
-def generate_learning_item(skill_name, skill_category, target_role, student_context=None):
+def generate_learning_item(skill_name, skill_category, target_role, student_context=None,
+                           deterministic=False):
     system = (
         "You are a personalized career coach creating a learning path item for a student "
         "working toward a specific target role. Produce content tailored to that role, "
@@ -1528,7 +1509,14 @@ def generate_learning_item(skill_name, skill_category, target_role, student_cont
         return {"explanation": explanation, "practice_exercise": practice,
                 "mini_project": project, "resources": res, "roadmap": roadmap}
 
-    raw = complete(system, user, fallback=json.dumps(fallback()), max_tokens=3200, timeout=180)
+    if deterministic:
+        # Fresh-install seeding must never block server startup on provider
+        # latency. Callers opt in explicitly; enrichment happens lazily later.
+        # Route the deterministic fallback through the same sanitization below
+        # (generic/dead-link filtering, roadmap renumbering) as the live path.
+        raw = json.dumps(fallback())
+    else:
+        raw = complete(system, user, fallback=json.dumps(fallback()), max_tokens=3200, timeout=180)
     parsed = _extract_json(raw)
     if not isinstance(parsed, dict):
         parsed = fallback()
@@ -1567,14 +1555,6 @@ def generate_learning_item(skill_name, skill_category, target_role, student_cont
     # real, direct, on-topic links ranked from the merged pool, with steps left
     # resource-unavailable rather than citing a channel/search/category page.
     roadmap = _finalize_roadmap(roadmap, resources, skill_name, skill_category, target_role)
-    roadmap["summary"] = _without_unsupported_learning_profile_claims(roadmap.get("summary"))
-    for step in roadmap.get("steps") or []:
-        for field in ("title", "objective", "practice", "checkpoint"):
-            step[field] = _without_unsupported_learning_profile_claims(step.get(field))
-        for resource in step.get("resources") or []:
-            for field in ("reason", "helpfulness", "learning_objective"):
-                if field in resource:
-                    resource[field] = _without_unsupported_learning_profile_claims(resource.get(field))
 
     # --- Skill Blueprint plan ---
     from .skill_blueprint import required_competencies as bp_required, modules_cover
@@ -1585,9 +1565,9 @@ def generate_learning_item(skill_name, skill_category, target_role, student_cont
     covered, missing = modules_cover(plan["modules"], skill_name, from_level, to_level)
 
     return {
-        "explanation": _without_unsupported_learning_profile_claims(parsed.get("explanation") or default["explanation"]),
-        "practice_exercise": _without_unsupported_learning_profile_claims(parsed.get("practice_exercise") or default["practice_exercise"]),
-        "mini_project": _without_unsupported_learning_profile_claims(parsed.get("mini_project") or default["mini_project"]),
+        "explanation": str(parsed.get("explanation") or default["explanation"]),
+        "practice_exercise": str(parsed.get("practice_exercise") or default["practice_exercise"]),
+        "mini_project": str(parsed.get("mini_project") or default["mini_project"]),
         "resources": resources,
         "roadmap": roadmap,
         "modules": plan["modules"],
@@ -6047,6 +6027,126 @@ def _interview_fallback_ar(last_answer, skill_name, target_role, turn=None, tuto
     return probes.get(persona, probes["neutral"])[index]
 
 
+# ---------------------------------------------------------------- 4D interview summary
+
+_INTERVIEW_TECH_TOKENS = frozenset({
+    "docker", "container", "api", "sql", "python", "code", "command", "script",
+    "test", "deploy", "volume", "image", "build", "git", "json", "function",
+    "loop", "example", "workflow", "http", "db", "data", "docker compose",
+    "terminal", "pipeline", "browser", "frontend", "backend", "آر", "docker",
+    "كود", "أمر", "اختبار", "دالة", "حلقة", "مثال",
+})
+
+_INTERVIEW_STRONG_TOKENS = frozenset({
+    "built", "made", "ran", "deployed", "tested", "fixed", "built it", "proved",
+    "بنيته", "شغّلته", "صلّحت", "اختبرته", "عملته", "نفذته",
+})
+
+
+def _interview_answer_stats(answers):
+    """Bounded, deterministic stats over the student's interview answers."""
+    if not answers:
+        return {"answered": 0, "avg_words": 0, "concrete": False, "technical": False}
+    words = sum(len(a.split()) for a in answers)
+    joined = " ".join(answers).lower()
+    return {
+        "answered": len(answers),
+        "avg_words": round(words / len(answers)),
+        "concrete": any(f" {tok} " in f" {joined} " for tok in _INTERVIEW_STRONG_TOKENS),
+        "technical": any(tok in joined for tok in _INTERVIEW_TECH_TOKENS),
+    }
+
+
+def interview_session_summary(messages, tutor_id=None, language=None, skill_name=None, target_role=None):
+    """Deterministic Phase 4D session summary for a finished mock interview.
+
+    Built ONLY from the stored conversation (question/answer exchange) and the
+    bounded digest-style stats above — no provider call, so it is instant and
+    never exposes transcripts. The summary is explicitly non-verifying practice
+    feedback: it never claims a skill is learned or verified.
+    """
+    answers = [
+        (m.get("content") or "").strip()
+        for m in (messages or [])
+        if m.get("role") == "user" and (m.get("content") or "").strip()
+    ]
+    questions = [
+        (m.get("content") or "").strip()
+        for m in (messages or [])
+        if m.get("role") == "assistant" and (m.get("content") or "").strip()
+    ]
+    stats = _interview_answer_stats(answers)
+    persona = TUTOR_PERSONAS.get((tutor_id or "").lower())
+    name = persona["name"] if persona else "the interviewer"
+    lang = _normalized_lang(language)
+    skill = skill_name or ("this skill" if lang == "en" else "المهارة")
+    role = target_role or ("this role" if lang == "en" else "الوظيفة المستهدفة")
+    covered = stats["answered"]
+
+    if covered == 0:
+        if lang == "ar":
+            strengths = "لما نبدأ، هتحتاج تتعمق في أمثلة عملية"
+            focus = "ابدأ بحكاية مثال حقيقي بسيط من التدريب أو المشروعات قبل ما نتغلب على التفاصيل"
+            next_step = "الخطوة الجاية: إعادة المقابلة مع محاولة إجابة سؤال واحد بمثال ملموس"
+        else:
+            strengths = "once we start, going deeper into concrete examples"
+            focus = "open with one small real example from practice or projects before we chase details"
+            next_step = "next up: try the interview again and aim to answer one question with a concrete example"
+    elif stats["concrete"] and stats["technical"]:
+        if lang == "ar":
+            strengths = "أجوبتك كانت عملية وواضحة ومبنية على أمثلة حقيقية ومصطلحات فنية"
+            focus = "اربط كل إجابة بخطوة التنفيذ: الأمر، الناتج، وطريقة التحقق"
+            next_step = "استمر بنفس الأسلوب على أسئلة أعمق في كل مهارة"
+        else:
+            strengths = "your answers were concrete and clear, backed by real examples and technical detail"
+            focus = "tie every answer to the execution step: the command, the output, and how you verified it"
+            next_step = "keep the same pattern against deeper follow-ups on each skill"
+    elif stats["concrete"]:
+        if lang == "ar":
+            strengths = "أجوبتك مبنية على أمثلة حقيقية من تجربتك"
+            focus = "أضف تفاصيل فنية (أوامر، output، tradeoffs) ليجعل دليلك أقوى"
+            next_step = "أعد الإجابة مرة أخرى مع مثال فني واحد محدد"
+        else:
+            strengths = "your answers drew on real experience"
+            focus = "add technical specifics (commands, outputs, tradeoffs) to make the evidence stronger"
+            next_step = "re-answer once more with one precise technical example"
+    elif covered == 1:
+        if lang == "ar":
+            strengths = "بدأت إجابة كاملة وخلّيت السؤال يمشي"
+            focus = "وسّع الإجابات لتشمل خطوة تنفيذ أو مثال محدد"
+            next_step = "المستخدم: اختبر سؤال واحد تاني وطوّر إجابتك"
+        else:
+            strengths = "you got a first answer in and kept the session moving"
+            focus = "grow answers to include one execution step or a specific example"
+            next_step = "keep going: take one more question and extend your answer"
+    else:
+        if lang == "ar":
+            strengths = "شاركت في محادثة من " + str(covered) + " إجابات وانتقلت للأسئلة التالية"
+            focus = "ارفع نسبة الجانب العملي: مزيد من الأمثلة والقياسات في كل إجابة"
+            next_step = "أعد المحادثة كلها مرة أخرى والحشد الأدلة العملية"
+        else:
+            strengths = f"you engaged for {covered} answers and moved smoothly through follow-ups"
+            focus = "raise the practical share: more examples and measurements in every answer"
+            next_step = "run the whole interview again and bring the practical evidence to each turn"
+
+    if lang == "ar":
+        opening = f"ملخص المقابلة — {name}"
+        body = (
+            f"{opening}: عدد الأسئلة {len(questions)}، وعدد الإجابات {covered} على {skill} لشغل {role}. "
+            f"اللي كان كويس: {strengths}. للتحسن: {focus}. {next_step}. "
+            "دي مراجعة تدريبية فقط — مش توثيق مهارة معتمدة ولا تقييم نهائي."
+        )
+    else:
+        opening = f"Interview summary — {name} heard {len(questions)} question"
+        opening += "s" if len(questions) != 1 else ""
+        body = (
+            f"{opening} and {covered} answer{'s' if covered != 1 else ''} on {skill} for {role}. "
+            f"What worked: {strengths}. To improve: {focus}. {next_step}. "
+            "This is practice feedback only — it does not create or verify any skill and is not an assessment result."
+        )
+    return " ".join(body.split())
+
+
 # ---------------------------------------------------------------- 5. Quiz generation
 
 def _mcq(question, options, answer, explanation):
@@ -6353,7 +6453,8 @@ def _balance_mc_options(q):
     return q
 
 
-def generate_quiz(skill_name, target_role=None, num_questions=10, difficulty="Intermediate"):
+def generate_quiz(skill_name, target_role=None, num_questions=10, difficulty="Intermediate",
+                  deterministic=False):
     difficulty = difficulty if difficulty in LEVELS else "Intermediate"
     system = (
         "You create assessment quiz questions for verifying a university student's skill "
@@ -6394,7 +6495,12 @@ def generate_quiz(skill_name, target_role=None, num_questions=10, difficulty="In
             return out
         return [factory(skill_name, (target_role or "this role")) for factory in _TEMPLATE_QUESTIONS][:num_questions]
 
-    raw = complete(system, user, fallback=json.dumps(fallback()), max_tokens=2048, timeout=150)
+    if deterministic:
+        # Seeding/cold-start path: use the reviewed question bank immediately
+        # instead of waiting on an external provider before the port opens.
+        raw = json.dumps(fallback())
+    else:
+        raw = complete(system, user, fallback=json.dumps(fallback()), max_tokens=2048, timeout=150)
     parsed = _extract_json(raw)
     if not isinstance(parsed, list) or not parsed:
         parsed = fallback()
@@ -6671,7 +6777,7 @@ def _diag_bank_for(skill_name):
     return bank
 
 
-def _diag_fallback(skill_name, competencies, target_role, num_questions):
+def _diag_fallback(skill_name, competencies, target_role, num_questions, max_questions=None):
     """Deterministic diagnostic generation — fully usable with no API key.
 
     Reuses the curated question bank when available (tagging each question with a
@@ -6681,7 +6787,8 @@ def _diag_fallback(skill_name, competencies, target_role, num_questions):
     """
     from . import diagnostics as dx
     comps = list(competencies or [])
-    n = max(dx.DIAGNOSTIC_MIN_QUESTIONS, min(dx.DIAGNOSTIC_MAX_QUESTIONS, int(num_questions or 7)))
+    cap = max_questions if max_questions is not None else dx.DIAGNOSTIC_MAX_QUESTIONS
+    n = max(dx.DIAGNOSTIC_MIN_QUESTIONS, min(cap, int(num_questions or 7)))
     items = []
     bank = _diag_bank_for(skill_name)
 
@@ -6751,10 +6858,9 @@ def generate_diagnostic(skill_name, competencies, target_role=None, num_question
     from . import diagnostics as dx
     comps = list(competencies or [])
 
-    # The curated Python slice has reviewed questions for its two canonical
-    # competencies.  Serve them before considering a provider or the broad
-    # skill-level bank: round-robin tagging would turn a Functions result into
-    # an Error Handling claim (or vice versa).
+    # Reviewed question banks are authoritative.  Returning them directly
+    # prevents a generic skill-wide fallback from relabelling a question as a
+    # different topic (for example an aggregation question as SQL filtering).
     curated = knowledge_base.curated_diagnostic_questions(skill_name, comps)
     if curated:
         return [

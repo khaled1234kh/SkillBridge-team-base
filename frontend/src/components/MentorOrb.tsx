@@ -58,7 +58,6 @@ export function MentorOrb({ mentorId, state, level, reducedMotion, onTap, ariaLa
       data-state={state}
       data-reduced={reducedMotion ? 'true' : undefined}
       style={style}
-      aria-hidden="true"
     >
       <span className="ml-halo" aria-hidden="true" />
       <span className="ml-ring r1" aria-hidden="true" />

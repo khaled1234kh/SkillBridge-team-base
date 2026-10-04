@@ -116,7 +116,7 @@ def test_result_connects_weak_competency_to_learning_content(client, soc):
     assert result["role_title"]
 
 
-def test_follow_up_resolves_skill_id_for_weak_component(db):
+def test_follow_up_resolves_skill_id_for_weak_component():
     """Unit: a mapped skill on a weak competency produces a lesson follow-up
     pointing at a real skill id in the registry."""
     scenario = {

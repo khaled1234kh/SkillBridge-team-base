@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useState } from 'react'
 import type { LearningItem, LearningResource, PersonalizedPath, SkillGap, TutorMode } from '../lib/types'
 import { GapPill } from './widgets'
 import { humanizeTopicLabel } from '../lib/topicLabels'
@@ -11,6 +11,7 @@ import {
   IconChat,
   IconCheck,
   IconClipboard,
+  IconClock,
   IconExternal,
   IconLightbulb,
   IconRoadmap,
@@ -117,7 +118,15 @@ export function LearningProgress({ done, total, label = 'Personalized topic prog
         <strong>{pct}%</strong>
       </div>
       <div className="lp-track"><span style={{ width: `${pct}%` }} /></div>
-      <div className="lp-meta">{done}/{total || 0} topics completed</div>
+      <div className="lp-meta">
+        {done}/{total || 0} topics completed{' '}
+        <WhyThis>
+          Numerator: personalized-path topics you completed (Mini Check passed). Denominator: topics across
+          your known personalized paths. Source: personalized-path progress for each open requirement.
+          Rounding: nearest whole percent. Study progress only — it never grants a Verified Skill and never
+          changes your profile level.
+        </WhyThis>
+      </div>
     </div>
   )
 }
@@ -148,24 +157,23 @@ export function CareerProgress({ completed, inProgress, notStarted }: {
   )
 }
 
-export function SkillCard({ gap, path, selected, profileSource, onSelect, onStart }: {
+export function SkillCard({ gap, path, selected, onSelect, onStart, profileSource }: {
   gap: SkillGap
   path?: PersonalizedPath | null
   selected?: boolean
-  profileSource?: 'claimed' | 'verified'
   onSelect: () => void
   onStart: () => void
+  profileSource?: 'claim' | 'verified'
 }) {
-  const profileSkill = !!profileSource
-  const fallback = profileSource === 'verified' || (!profileSkill && gap.status === 'strong') ? 100 : 0
+  const fallback = gap.status === 'strong' ? 100 : 0
   const progress = topicProgressFor(path, fallback)
-  const canGenerate = profileSkill || gap.status !== 'strong'
+  const canGenerate = gap.status !== 'strong'
   const progressLabel = progress.hasTopics
     ? `${progress.done}/${progress.total} topics`
-    : profileSource === 'verified' ? 'Officially verified' : profileSource === 'claimed' ? 'Diagnostic not started' : gap.status === 'strong' ? 'Ready' : 'Diagnostic needed'
+    : gap.status === 'strong' ? 'Ready' : 'Diagnostic needed'
   const cta = path
     ? progress.complete ? 'Review Path' : 'Continue Learning'
-    : profileSkill ? 'Start diagnostic' : 'Start Learning'
+    : 'Start Learning'
   return (
     <article className={`learning-skill-card ${selected ? 'selected' : ''}`} onClick={onSelect}>
       <div className="lsc-head">
@@ -173,26 +181,24 @@ export function SkillCard({ gap, path, selected, profileSource, onSelect, onStar
           <h3>{gap.skill_name}</h3>
           <span>{gap.category}</span>
         </div>
-        {profileSource ? (
-          <span className={`priority-pill ${profileSource === 'verified' ? 'neutral' : ''}`}>
-            {profileSource === 'verified' ? 'Officially verified' : 'Profile claim'}
-          </span>
-        ) : <GapPill status={gap.status} />}
+        <GapPill status={gap.status} />
       </div>
       <div className="lsc-progress">
         <div className="lsc-track"><span style={{ width: `${progress.pct}%` }} /></div>
         <strong>{progressLabel}</strong>
       </div>
       <div className="lsc-meta">
-        {profileSource ? (
-          <span>{profileSource === 'verified' ? 'Verified through Final Assessment' : `Self-reported: ${gap.student_level || 'level not recorded'}`}</span>
-        ) : <>
-          <span>Required: {gap.required_level}</span>
-          <span>{gap.student_level ? `You: ${gap.student_level}` : 'Missing evidence'}</span>
-        </>}
+        <span>Required: {gap.required_level}</span>
+        <span>{gap.student_level ? `You: ${gap.student_level}` : 'Missing evidence'}</span>
       </div>
       <div className="lsc-foot">
-        <span className="priority-pill neutral">{profileSource ? 'Profile skill' : 'Current order'}</span>
+        {profileSource ? (
+          <span className={`prov-pill ${profileSource === 'verified' ? 'prov-verified' : ''}`}>
+            {profileSource === 'verified' ? 'Officially verified' : 'Profile claim'}
+          </span>
+        ) : (
+          <span className="priority-pill neutral">Current order</span>
+        )}
         {canGenerate ? (
           <button className="btn btn-primary btn-sm" onClick={(e) => { e.stopPropagation(); onStart() }}>
             <IconArrowRight size={14} /> {cta}
@@ -233,6 +239,88 @@ export function ContinueLearningCard({ gap, path, onSelect }: {
         </button>
       </div>
     </article>
+  )
+}
+
+export type MilestoneState = 'completed' | 'current' | 'upcoming' | 'locked' | 'needs_review'
+
+export const MILESTONE_LABELS: Record<MilestoneState, string> = {
+  completed: 'completed',
+  current: 'current',
+  upcoming: 'upcoming',
+  locked: 'locked',
+  needs_review: 'needs review',
+}
+
+export function topicMilestoneState(
+  isDone: boolean,
+  isCurrent: boolean,
+  lessonState?: string,
+  miniCheckResult?: { passed?: boolean } | null,
+): MilestoneState {
+  if (isDone) return 'completed'
+  if (isCurrent) {
+    const needsReview = lessonState === 'in_progress' && miniCheckResult && !miniCheckResult.passed
+    return needsReview ? 'needs_review' : 'current'
+  }
+  return 'upcoming'
+}
+
+export function stageMilestoneState(isDone: boolean, locked: boolean): MilestoneState {
+  if (isDone) return 'completed'
+  return locked ? 'locked' : 'upcoming'
+}
+
+export function MilestoneChip({ state }: { state: MilestoneState }) {
+  return (
+    <span className={`pp-milestone pp-milestone-${state}`} title={`Milestone status: ${MILESTONE_LABELS[state]}`}>
+      {MILESTONE_LABELS[state]}
+    </span>
+  )
+}
+
+export function WhyThis({ label = 'Why this?', children }: {
+  label?: string
+  children: React.ReactNode
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <span className="why-this">
+      <button type="button" className="why-this-btn" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+        {label}
+      </button>
+      {open && <span className="why-this-body">{children}</span>}
+    </span>
+  )
+}
+
+export function CurrentLessonCard({ skillName, topicTitle, estimatedMinutes, completedTopics = 0, totalTopics = 0, purpose, onContinue }: {
+  skillName: string
+  topicTitle: string
+  estimatedMinutes?: number
+  completedTopics?: number
+  totalTopics?: number
+  purpose: string
+  onContinue: () => void
+}) {
+  return (
+    <div className="journey-card">
+      <div className="journey-card-icon"><IconRoadmap size={18} /></div>
+      <div className="journey-card-copy">
+        <span className="cc-kicker">{skillName}</span>
+        <h3>{topicTitle}</h3>
+        <p className="muted small">
+          {purpose}
+          {totalTopics > 0 ? <> · {completedTopics}/{totalTopics} topics complete</> : null}
+          {estimatedMinutes ? <> · <span className="pp-est"><IconClock size={13} /> ~{estimatedMinutes} min</span></> : null}
+        </p>
+      </div>
+      <div className="journey-card-actions">
+        <button className="btn btn-primary" onClick={onContinue}>
+          <IconArrowRight size={14} /> Continue learning
+        </button>
+      </div>
+    </div>
   )
 }
 
@@ -425,17 +513,16 @@ export function LessonFlow() {
   )
 }
 
-export function SkillDetailHeader({ gap, item, roleTitle, topicProgress, profileSource }: {
+export function SkillDetailHeader({ gap, item, roleTitle, topicProgress }: {
   gap: SkillGap
   item?: LearningItem
   roleTitle?: string
   topicProgress?: TopicProgressSummary
-  profileSource?: 'claimed' | 'verified'
 }) {
-  const progress = topicProgress ?? topicProgressFor(null, profileSource === 'verified' || gap.status === 'strong' ? 100 : 0)
+  const progress = topicProgress ?? topicProgressFor(null, gap.status === 'strong' ? 100 : 0)
   const progressText = progress.hasTopics
     ? `${progress.done}/${progress.total} topics complete`
-    : profileSource === 'verified' ? 'Officially verified' : profileSource === 'claimed' ? 'Profile claim — diagnostic first' : gap.status === 'strong' ? 'No Learning needed' : 'Diagnostic first'
+    : gap.status === 'strong' ? 'No Learning needed' : 'Diagnostic first'
   return (
     <div className="skill-detail-header">
       <div>
@@ -452,7 +539,7 @@ export function SkillDetailHeader({ gap, item, roleTitle, topicProgress, profile
         <IconTarget size={18} />
         <div>
           <strong>Why this matters</strong>
-          <span>{profileSource ? (profileSource === 'verified' ? 'Officially verified through Final Assessment' : 'Stored as a profile claim; a diagnostic can guide learning') : `Relevant to ${roleTitle || 'your selected target role'}`}</span>
+          <span>Relevant to {roleTitle || 'your selected target role'}</span>
         </div>
       </div>
     </div>

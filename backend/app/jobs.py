@@ -32,6 +32,7 @@ skipped, with redacted reasons) accompanies every payload.
 """
 import hashlib
 import ipaddress
+import json
 import logging
 import os
 import re
@@ -56,6 +57,7 @@ ARBEITNOW_URL = "https://www.arbeitnow.com/api/job-board-api"
 JOOBLE_BASE = "https://jooble.org/api"
 JSEARCH_URL = "https://jsearch.p.rapidapi.com/search-v2"
 USAJOBS_URL = "https://data.usajobs.gov/api/search"
+BRIGHTDATA_URL = "https://api.brightdata.com/request"
 
 # RapidAPI LinkedIn / Google Jobs adapters are HOST-GATED: the exact host of the
 # subscribed RapidAPI app is configured via env (LINKEDIN_JOBS_HOST/LINKEDIN_JOBS_PATH,
@@ -90,9 +92,9 @@ _HEADERS = {"User-Agent": "SkillBridge/1.0 (career platform; student job matchin
 # Google Jobs (RapidAPI) are host-gated — until the exact subscribed host is
 # configured they report ``host_not_configured`` and skip.
 PROVIDERS = (
-    "JSearch", "LinkedIn", "Google Jobs", "Adzuna", "USAJobs",
+    "Bright Data", "JSearch", "LinkedIn", "Google Jobs", "Adzuna", "USAJobs",
     "Remotive", "Jobicy", "Arbeitnow", "RemoteOK",
-    "Jooble", "Himalayas", "Get on Board",
+    "Jooble", "Himalayas", "Get on Board", "Employer boards",
 )
 
 # Countries Adzuna actually serves (their API 404s on any other two-letter code,
@@ -212,7 +214,7 @@ def _health_of(entry, source):
     if status == "ok":
         return HEALTH["healthy"] if count > 0 else HEALTH["empty_success"]
     if status == "skipped":
-        if reason in ("no_credentials", "host_not_configured"):
+        if reason in ("no_credentials", "host_not_configured", "zone_not_configured"):
             return HEALTH["unconfigured"]
         if reason in ("unsupported_country", "disabled_by_feature_flag"):
             return HEALTH["disabled_by_feature_flag"]
@@ -264,6 +266,9 @@ def _provider_is_configured(source):
         return True
     if source == "JSearch":
         return bool(os.environ.get("JSEARCH_API_KEY") or os.environ.get("RAPIDAPI_KEY"))
+    if source == "Bright Data":
+        return bool(os.environ.get("BRIGHTDATA_API_KEY")) and bool(
+            os.environ.get("BRIGHTDATA_SERP_ZONE"))
     if source == "LinkedIn":
         return bool(os.environ.get("LINKEDIN_JOBS_HOST")) and bool(
             os.environ.get("RAPIDAPI_LINKEDIN_KEY") or os.environ.get("RAPIDAPI_KEY"))
@@ -340,7 +345,7 @@ def _redact(text):
     reaches a public payload or a log.
     """
     s = str(text or "")
-    for var in ("JSEARCH_API_KEY", "RAPIDAPI_KEY", "RAPIDAPI_LINKEDIN_KEY",
+    for var in ("BRIGHTDATA_API_KEY", "JSEARCH_API_KEY", "RAPIDAPI_KEY", "RAPIDAPI_LINKEDIN_KEY",
                 "RAPIDAPI_GOOGLE_JOBS_KEY", "LINKEDIN_JOBS_API_KEY",
                 "GOOGLE_JOBS_API_KEY", "ADZUNA_APP_ID",
                 "ADZUNA_APP_KEY", "JOOBLE_API_KEY", "USAJOBS_API_KEY"):
@@ -511,7 +516,7 @@ _level_to_want = {"Beginner": "entry", "Intermediate": "junior", "Advanced": "mi
 # markets, filters and limits can never overwrite or reuse incompatible rows.
 # Memory is bounded by TTL + an LRU entry cap. The one canonical key drives
 # reads, background-fetch dedup, and writes, so they can never diverge.
-_CACHE_TAG = "jobs-cache-v1"   # bump when provider set / env semantics / ranking change
+_CACHE_TAG = "jobs-cache-v3"   # bump when provider set / env semantics / ranking change
 _CACHE_MAX_ENTRIES_DEFAULT = 256
 
 # Phase H — internal-record normalization + link quality (offline, additive).
@@ -1559,6 +1564,13 @@ def job_score_components(job, keywords, student_seniority, country, city="",
     }
 
 
+def _surfaced_jobs(data):
+    """All rows visible in the combined or provider-specific feed."""
+    yield from data.get("jobs") or []
+    for rows in (data.get("provider_jobs") or {}).values():
+        yield from rows or []
+
+
 def locate_feed_job(skills, role, country, location, requisites, market,
                     fingerprint, limit=10):
     """Locate a specific surfaced job by fingerprint in the student's feed cache.
@@ -1581,7 +1593,7 @@ def locate_feed_job(skills, role, country, location, requisites, market,
             # genuinely absent profile triggers a (re)build.
             for k, e in _cache.items():
                 if _same_profile_key(k, target_parts):
-                    for j in (e.get("data") or {}).get("jobs") or []:
+                    for j in _surfaced_jobs(e.get("data") or {}):
                         if j.get("fingerprint") == fingerprint:
                             entry = e
                             break
@@ -1593,9 +1605,19 @@ def locate_feed_job(skills, role, country, location, requisites, market,
                              request_id="")
         with _lock:
             entry = _cache.get(key) or {"data": data, "at": time.time()}
-    for j in (entry.get("data") or {}).get("jobs") or []:
+    for j in _surfaced_jobs(entry.get("data") or {}):
         if j.get("fingerprint") == fingerprint:
             return j
+    # Another result limit can have a longer provider slice for this same
+    # profile. Do not 404 a visible row just because an exact shorter cache
+    # entry also exists.
+    with _lock:
+        for k, other in _cache.items():
+            if k == key or not _same_profile_key(k, target_parts):
+                continue
+            for j in _surfaced_jobs(other.get("data") or {}):
+                if j.get("fingerprint") == fingerprint:
+                    return j
     return None
 
 
@@ -1620,9 +1642,16 @@ def peek_feed_job(skills, role, country, location, requisites, market,
                     break
     if entry is None:
         return None
-    for j in (entry.get("data") or {}).get("jobs") or []:
+    for j in _surfaced_jobs(entry.get("data") or {}):
         if j.get("fingerprint") == fingerprint:
             return {"found": True, "job": j}
+    with _lock:
+        for k, other in _cache.items():
+            if k == key or not _same_profile_key(k, target_parts):
+                continue
+            for j in _surfaced_jobs(other.get("data") or {}):
+                if j.get("fingerprint") == fingerprint:
+                    return {"found": True, "job": j}
     return {"found": False, "job": None}
 
 
@@ -1688,6 +1717,10 @@ def _expiry_props(raw, listed_date):
         is_expired, expires_at = close_date < date.today(), close_date.isoformat()
     elif expires:
         is_expired, expires_at = expires < date.today(), expires.isoformat()
+    elif available is True:
+        # A currently published employer board is authoritative even if its
+        # original posting date is older than our aggregator age heuristic.
+        is_expired, expires_at = False, None
     elif listed_days_ago is not None and listed_days_ago > MAX_LISTING_AGE_DAYS:
         is_expired, expires_at = True, None
     else:
@@ -1885,6 +1918,12 @@ def normalise_listing(j, fetched_at=None):
     description = item.get("description", "")
     seniority_label = _seniority_label(item)
 
+    try:
+        _scheme = (urllib.parse.urlparse(url).scheme or "").lower()
+    except Exception:
+        _scheme = ""
+    apply_safe = bool(url) and link_state not in ("rejected", "dead") and _scheme in ("http", "https")
+
     item.update({
         "provider": source,
         "provider_job_id": provider_job_id or None,
@@ -1896,6 +1935,7 @@ def normalise_listing(j, fetched_at=None):
         "seniority": seniority_label,
         "description_excerpt": description[:_DESCRIPTION_EXCERPT_LEN],
         "apply_url": url,
+        "apply_safe": apply_safe,
         "published_date": raw_date,
         "fetched_at": datetime.fromtimestamp(fetched_at, tz=timezone.utc).isoformat(),
         "listing_status": listing_status,
@@ -1914,6 +1954,7 @@ def normalise_listing(j, fetched_at=None):
                 "basis": "provider_field" if employment_type else "unknown",
             },
             "is_expired": {"value": is_expired, "basis": "provider_signal"},
+            "apply_url": {"value": url, "basis": "provider_field" if url else "unknown"},
         },
         "observed_salary": [salary] if salary else [],
         "observed_employment_type": [employment_type] if employment_type else [],
@@ -2000,15 +2041,17 @@ def _merge(raw_jobs):
             prev_rank = _link_rank.get(prev.get("link_state"), 1)
             new_rank = _link_rank.get(new.get("link_state"), 1)
             if new_rank > prev_rank:
-                merged_item["url"] = new["url"]
-                merged_item["apply_url"] = new["apply_url"]
-                merged_item["link_state"] = new["link_state"]
-                merged_item["link_reason"] = new.get("link_reason", "")
+                chosen_link = new
             elif new_rank < prev_rank:
-                merged_item["url"] = prev["url"]
-                merged_item["apply_url"] = prev["apply_url"]
-                merged_item["link_state"] = prev["link_state"]
-                merged_item["link_reason"] = prev.get("link_reason", "")
+                chosen_link = prev
+            else:
+                chosen_link = None
+            if chosen_link is not None:
+                merged_item["url"] = chosen_link["url"]
+                merged_item["apply_url"] = chosen_link["apply_url"]
+                merged_item["link_state"] = chosen_link["link_state"]
+                merged_item["link_reason"] = chosen_link.get("link_reason", "")
+                merged_item["apply_safe"] = chosen_link.get("apply_safe", False)
             merged_item["listing_status"] = (
                 "link-unavailable"
                 if merged_item.get("link_state") in ("dead", "rejected")
@@ -2588,16 +2631,13 @@ def _extract_job_items(payload):
     return []
 
 
-def _fetch_rapidapi_jobs(name, host_env, path_env, key_env, n, keywords, country="", extra_params=None, suppress_default_params=False):
+def _fetch_rapidapi_jobs(name, host_env, path_env, key_env, n, keywords, country="",
+                         extra_params=None, suppress_default_params=False):
     """Shared RapidAPI job-search adapter with the existing provider contract.
 
     Returns provider-normalised listings (the same shape JSearch/Jooble emit),
     records health, handles timeouts / 429 rate limits / auth errors, and never
     raises. One provider failing never affects the unified feed.
-
-    extra_params: optional dict of additional query parameters to merge into
-    the request (e.g., LinkedIn requires time_frame and uses 'title' not 'query').
-    suppress_default_params: if True, don't add the default 'query' and 'location' params.
     """
     host, path, key = _provider_rapidapi_cfg(host_env, path_env, key_env, name)
     if not host:
@@ -2609,9 +2649,7 @@ def _fetch_rapidapi_jobs(name, host_env, path_env, key_env, n, keywords, country
         url = f"https://{host}/{path}"
     jobs = []
     try:
-        params = {}
-        if not suppress_default_params:
-            params = {"query": query, "location": country or ""}
+        params = {} if suppress_default_params else {"query": query, "location": country or ""}
         if extra_params:
             params.update(extra_params)
         resp = httpx.get(
@@ -2704,21 +2742,18 @@ def _fetch_linkedin_jobs(n, keywords, country=""):
     (LINKEDIN_JOBS_HOST / LINKEDIN_JOBS_PATH) — the API host is never guessed.
     Key: RAPIDAPI_LINKEDIN_KEY, falling back to RAPIDAPI_KEY.
 
-    LinkedIn API requires:
-    - time_frame (required): 1h, 24h, 7d, 6m
-    - title (instead of query): search keywords
-    - location (optional): job location
+    The configured LinkedIn RapidAPI adapter expects ``title`` and its required
+    ``time_frame`` parameter rather than the generic adapter's ``query`` key.
     """
-    # LinkedIn uses 'title' instead of 'query', and requires time_frame
     return _fetch_rapidapi_jobs(
         "LinkedIn", "LINKEDIN_JOBS_HOST", "LINKEDIN_JOBS_PATH",
         "RAPIDAPI_LINKEDIN_KEY", n, keywords, country,
-        extra_params={
-            "time_frame": "24h",  # required; can be overridden if needed
-            "title": " ".join(keywords[:5]) if keywords else "",
-            "location": country or "",
-        },
-        suppress_default_params=True
+        # Keep ``query`` as a compatibility alias for configured RapidAPI
+        # variants and existing integrations; adapters that require ``title``
+        # use that value as their authoritative search field.
+        extra_params={"time_frame": "24h", "title": " ".join(keywords[:5]),
+                      "query": " ".join(keywords[:5]), "location": country or ""},
+        suppress_default_params=True,
     )
 
 
@@ -2942,6 +2977,253 @@ def _set_report_in_thread(report):
     _thread_local.report = report
 
 
+def _brightdata_job_items(payload):
+    """Accept only explicit jobs arrays, never ordinary web-search results."""
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, dict):
+        return None
+    # ``format=json`` wraps the parsed SERP in a string-valued ``body``.
+    if "body" in payload and "status_code" in payload:
+        if payload.get("status_code") != 200:
+            return None
+        body = payload["body"]
+        if isinstance(body, str):
+            try:
+                body = json.loads(body)
+            except ValueError:
+                return None
+        payload = body
+        if not isinstance(payload, dict):
+            return None
+    for wrapper in (payload, payload.get("data"), payload.get("result")):
+        if not isinstance(wrapper, dict):
+            continue
+        for key in ("jobs", "job_results", "job_listings", "jobs_results"):
+            section = wrapper.get(key)
+            if isinstance(section, list):
+                return section
+            if isinstance(section, dict) and isinstance(section.get("items"), list):
+                return section["items"]
+    # A valid Google SERP can have no jobs section for some queries/locations.
+    # That is an honest empty result, not a malformed provider response.
+    if "general" in payload and "organic" in payload:
+        return []
+    return None
+
+
+def _brightdata_text(item, *keys):
+    value = _job_field(item, *keys)
+    if isinstance(value, dict):
+        value = _job_field(value, "name", "title", "label", "value")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _fetch_brightdata_jobs(n, keywords, country=""):
+    """Fetch a bounded set of localized Egypt searches through Bright Data.
+
+    The API key and SERP zone remain server-side. A zone is mandatory; an API
+    key by itself cannot perform a search. A missing or unfamiliar response
+    schema is a provider failure, never fabricated job data.
+    """
+    if _normalise_country(country) != "Egypt":
+        _skip_status("Bright Data", "unsupported_country")
+        return []
+    key = os.environ.get("BRIGHTDATA_API_KEY", "").strip()
+    zone = os.environ.get("BRIGHTDATA_SERP_ZONE", "").strip()
+    if not key:
+        _skip_status("Bright Data", "no_credentials")
+        return []
+    if not zone:
+        _skip_status("Bright Data", "zone_not_configured")
+        return []
+    query = str(next((term for term in keywords if term), "jobs"))[:80]
+    # The full Jobs-panel ``ibp`` parameter returned a slow upstream 502 for
+    # this zone; a localized ordinary query returns an explicit jobs.items list.
+    searches = (f"{query} jobs Egypt", f"{query} jobs Cairo Egypt",
+                f"{query} jobs Alexandria Egypt")
+
+    def fetch(search):
+        search_url = "https://www.google.com/search?" + urllib.parse.urlencode({
+            "q": search, "gl": "eg", "hl": "en", "brd_json": "1",
+        })
+        try:
+            resp = httpx.post(
+                BRIGHTDATA_URL,
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json={"zone": zone, "url": search_url, "format": "json", "country": "eg"},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            if isinstance(payload, dict) and payload.get("status_code", 200) != 200:
+                return [], "upstream_error", str(payload["status_code"])
+            if isinstance(payload, dict) and (payload.get("error") or payload.get("message")):
+                return [], "request_failed", ""
+            items = _brightdata_job_items(payload)
+            if items is None:
+                return [], "malformed_response", ""
+            return items, "", ""
+        except httpx.HTTPStatusError as exc:
+            code = exc.response.status_code
+            reason = "rate_limited" if code == 429 else "unauthorized" if code in (401, 403) else "request_failed"
+            return [], reason, str(code)
+        except httpx.TimeoutException:
+            return [], "timeout", ""
+        except (ValueError, TypeError):
+            return [], "malformed_response", ""
+        except httpx.RequestError:
+            return [], "network_unreachable", ""
+
+    # Bound account usage to three searches per cache build. Run concurrently
+    # so a failing city query does not delay the whole result by 3 timeouts.
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        outcomes = list(executor.map(fetch, searches))
+    succeeded = any(not reason for _, reason, _ in outcomes)
+    if not succeeded:
+        reason, error = next(((reason, error) for _, reason, error in outcomes if reason),
+                             ("request_failed", ""))
+        if reason in ("rate_limited", "unauthorized", "timeout"):
+            _set_provider_cooldown("Bright Data", reason)
+        _record_status("Bright Data", "failed", reason=reason, error=error)
+        return []
+
+    jobs = []
+    seen = set()
+    for items, reason, _ in outcomes:
+        if reason:
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            title = _brightdata_text(item, "title", "job_title", "jobTitle")
+            company = _brightdata_text(item, "company", "company_name", "employer_name")
+            location = _brightdata_text(item, "location", "job_location", "city")
+            # Google's ``apply_link`` may be a relative /goto path. Prefer a
+            # real absolute apply URL, then its absolute Jobs listing URL.
+            link = ""
+            for link_key in ("apply_link", "apply_url", "job_apply_link",
+                             "link", "url", "job_url"):
+                candidate = _brightdata_text(item, link_key)
+                if candidate.startswith(("https://", "http://")):
+                    link = candidate
+                    break
+            for option in item.get("apply_options") or []:
+                if not link and isinstance(option, dict):
+                    link = _brightdata_text(option, "link", "url", "apply_url")
+            if not title or not link or not link.startswith(("https://", "http://")):
+                continue
+            # Country is a hard guard for this Egypt-only adapter; never label
+            # an explicitly foreign listing as Egyptian merely due to `gl=eg`.
+            stated_country = _normalise_country(_brightdata_text(item, "country"))
+            if stated_country and stated_country != "Egypt":
+                continue
+            # "Remote" or a blank location alone is not evidence of Egypt.
+            if not stated_country and _EGYPT_LOCATION_RE.search(location) is None:
+                continue
+            published = _brightdata_text(item, "posted_at", "posted_date", "date", "published_at")
+            identity = (_brightdata_text(item, "id", "job_id") or link).lower()
+            if identity in seen:
+                continue
+            seen.add(identity)
+            jobs.append({
+                "title": title, "company": company or "Unknown company",
+                "url": link, "location": location or "Egypt", "country": "Egypt",
+                "date": published[:10] if re.match(r"^\d{4}-\d{2}-\d{2}", published) else "",
+                "description": _brightdata_text(item, "description", "snippet", "summary"),
+                "employment_type": _brightdata_text(item, "employment_type", "job_type", "type"),
+                "source": "Bright Data",
+                "id": _brightdata_text(item, "id", "job_id"),
+            })
+            if len(jobs) >= n:
+                break
+        if len(jobs) >= n:
+            break
+    _record_status("Bright Data", "ok", len(jobs))
+    return jobs
+
+
+_EGYPT_EMPLOYER_BOARDS = (
+    ("lever", "Bosta", "Bosta"),
+    ("lever", "econstruct", "e.construct"),
+    ("greenhouse", "careem", "Careem"),
+)
+_EGYPT_LOCATION_RE = re.compile(
+    r"\b(egypt|cairo|giza|alexandria|maadi|mohandeseen|nasr city|"
+    r"new capital|sheikh zayed|6th (?:of )?october|port said|suez|"
+    r"mansoura|tanta|ismailia|assiut|asyut|aswan|minya|zagazig|"
+    r"hurghada|sharm el sheikh|new cairo)\b", re.I)
+
+
+def _fetch_employer_boards(n, country=""):
+    """Read selected employers' documented public boards, without credentials.
+
+    These are public career-board API listings, not LinkedIn/Wuzzuf content.
+    Keep only explicitly Egypt-located jobs and link to the employer's own
+    application page. An absent date is intentionally NOT called newly posted.
+    """
+    if _normalise_country(country) != "Egypt":
+        _skip_status("Employer boards", "unsupported_country")
+        return []
+
+    jobs = []
+    successes = 0
+    errors = []
+    for board_type, slug, company in _EGYPT_EMPLOYER_BOARDS:
+        board_count = 0
+        if board_type == "lever":
+            url = f"https://api.lever.co/v0/postings/{slug}"
+            params = {"mode": "json"}
+        else:
+            url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"
+            params = {}
+        try:
+            resp = httpx.get(url, params=params, headers=_HEADERS, timeout=8)
+            resp.raise_for_status()
+            payload = resp.json()
+            entries = payload if board_type == "lever" else payload.get("jobs", [])
+            if not isinstance(entries, list):
+                raise ValueError("unexpected job board response")
+            successes += 1
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                if board_type == "lever":
+                    categories = entry.get("categories") or {}
+                    locations = categories.get("allLocations") or [categories.get("location") or ""]
+                    location = ", ".join(str(loc) for loc in locations if loc)
+                    title = entry.get("text")
+                    apply_url = entry.get("hostedUrl") or entry.get("applyUrl")
+                    job_id = entry.get("id")
+                else:
+                    location = str((entry.get("location") or {}).get("name") or "")
+                    title = entry.get("title")
+                    apply_url = entry.get("absolute_url")
+                    job_id = entry.get("id")
+                if not _EGYPT_LOCATION_RE.search(location) or not title or not apply_url:
+                    continue
+                jobs.append({
+                    "title": title, "company": company, "url": apply_url,
+                    "location": location, "country": "Egypt", "date": "",
+                    "available": True,  # returned by this currently published board
+                    "source": "Employer boards",
+                    "id": f"{board_type}:{slug}:{job_id}" if job_id else "",
+                })
+                board_count += 1
+                if board_count >= n:
+                    break
+        except Exception as exc:
+            errors.append(f"{company}: {type(exc).__name__}")
+            logger.warning("job provider Employer boards %s failed: %s", company, _redact(exc))
+    if successes:
+        _record_status("Employer boards", "ok", len(jobs),
+                       reason="partial_failure" if errors else "")
+    else:
+        _record_status("Employer boards", "failed", 0, reason="request_failed",
+                       error=", ".join(errors)[:120])
+    return jobs
+
+
 def _fetch_all(limit_each, keywords=(), country="", adzuna_country="", report=None):
     """Fetch from all job feeds in parallel. Uses short timeouts to avoid blocking the
     request thread for too long. Each feed is tried independently so a
@@ -2961,6 +3243,7 @@ def _fetch_all(limit_each, keywords=(), country="", adzuna_country="", report=No
     rid = (report or {}).get("request_id", "") if report else ""
     prefix = f"[{rid}] " if rid else ""
     calls = [
+        ("Bright Data", lambda: _fetch_brightdata_jobs(max(limit_each, 25), list(keywords), exec_loc)),
         ("Remotive", lambda: _fetch_remotive(max(limit_each, 40))),
         ("RemoteOK", lambda: _fetch_remoteok(max(limit_each, 40))),
         ("Adzuna", lambda: _fetch_adzuna(max(limit_each, 40), list(keywords), exec_loc)),
@@ -2973,6 +3256,7 @@ def _fetch_all(limit_each, keywords=(), country="", adzuna_country="", report=No
         ("LinkedIn", lambda: _fetch_linkedin_jobs(max(limit_each, 25), list(keywords), exec_loc)),
         ("Google Jobs", lambda: _fetch_google_jobs(max(limit_each, 25), list(keywords), exec_loc)),
         ("USAJobs", lambda: _fetch_usajobs(max(limit_each, 15), list(keywords), exec_loc)),
+        ("Employer boards", lambda: _fetch_employer_boards(max(limit_each, 25), exec_loc)),
     ]
 
     if report is not None:
@@ -3154,6 +3438,10 @@ def _build_result(key, skills, role, country, location, limit, role_requisites=(
     # merely happens to be remote/unknown-location. Local fit still decides
     # ordering *within* a band because location is the third sort key.
     selected = ranked[:limit]
+    # The global top-N can be dominated by another provider. Preserve a
+    # bounded provider-specific slice so choosing Bright Data actually shows
+    # its Egypt results, even when none happened to reach the global top-N.
+    bright_data_jobs = [j for j in ranked if j.get("provider") == "Bright Data"][:limit]
 
     if not selected and feed_source == "live":
         feed_source = "empty"
@@ -3163,7 +3451,11 @@ def _build_result(key, skills, role, country, location, limit, role_requisites=(
     data = {
         "source": feed_source,
         "status": "fresh",
+        # Timestamp of the provider fetch, not the time a browser read this
+        # response. Cached/stale responses retain it so freshness is honest.
+        "checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "jobs": selected[:limit],
+        "provider_jobs": {"Bright Data": bright_data_jobs},
         "groups": {
             "local_count": len(local),
             "broader_count": len(broader),
@@ -3272,26 +3564,13 @@ def recent_jobs(skills=(), role="", country="", location="", limit=10, _sync=Fal
                                 request_id=request_id)
         return {**entry["data"], "status": "stale_fallback"}
 
-    # Cache miss — kick off a background fetch, then poll for the result
-    # up to 15 seconds. Return cached data as soon as it appears.
-    # On timeout, return the existing unavailable response; the background
-    # fetch continues and populates the cache for the next caller.
+    # Cache miss — kick off a background fetch and return an honest
+    # ``unavailable`` empty response immediately so the dashboard request never
+    # blocks on external HTTP calls. Curated/demo jobs are never served here.
     logger.debug("jobs cache miss: key=%s", key)
     _maybe_background_fetch(key, skills, role, country, location, limit,
                             role_requisites=role_requisites, market_country=market_country,
                             request_id=request_id)
-
-    # Poll for cached result up to 15 seconds (250ms intervals)
-    deadline = time.time() + 15.0
-    while time.time() < deadline:
-        with _lock:
-            entry = _cache.get(key)
-        if entry is not None:
-            # Background fetch completed; return live data
-            return {**entry["data"], "status": "live"}
-        time.sleep(0.25)
-
-    # Timeout: return unavailable, background fetch continues for next caller
     return {
         "source": "unavailable",
         "status": "unavailable",

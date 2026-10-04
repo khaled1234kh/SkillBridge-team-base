@@ -263,6 +263,67 @@ def test_mini_check_pass_completes_lesson(client, docker_skill, student_id, auth
     assert item_id in body["path_progress"]
 
 
+def test_completed_mini_check_cannot_be_overwritten(client, docker_skill, student_id, auth_headers):
+    headers = auth_headers("aisha@student.edu")
+    sk = docker_skill["id"]
+    path = _setup_path(client, headers, sk, student_id)
+    comp = path["items"][0]["competency"]
+    item_id = path["items"][0]["id"]
+    lesson_url = f"/api/students/{student_id}/learning/{sk}/lessons/{comp}"
+    client.post(f"{lesson_url}/generate", json={}, headers=headers)
+    client.post(f"{lesson_url}/start", json={}, headers=headers)
+    lesson = client.get(lesson_url, headers=headers).json()
+    questions = lesson["content"]["mini_check"]["questions"]
+    passed = client.post(
+        f"{lesson_url}/mini-check",
+        json={"answers": [q["correct_answer"] for q in questions]},
+        headers=headers)
+    assert passed.status_code == 200
+    before = client.get(lesson_url, headers=headers).json()
+    path_before = client.get(
+        f"/api/students/{student_id}/learning/{sk}/personalized-path",
+        headers=headers).json()
+
+    rejected = client.post(
+        f"{lesson_url}/mini-check",
+        json={"answers": ["WRONG" for _ in questions]},
+        headers=headers)
+
+    assert rejected.status_code == 409
+    assert "already completed" in rejected.json()["detail"].lower()
+    after = client.get(lesson_url, headers=headers).json()
+    path_after = client.get(
+        f"/api/students/{student_id}/learning/{sk}/personalized-path",
+        headers=headers).json()
+    assert after["state"] == before["state"] == "completed"
+    assert after["mini_check_result"] == before["mini_check_result"]
+    assert after["completed_at"] == before["completed_at"]
+    assert path_after["progress"] == path_before["progress"]
+    assert item_id in (path_after.get("progress") or [])
+
+
+def test_update_to_in_progress_clears_completed_timestamp(client, docker_skill, student_id, auth_headers):
+    headers = auth_headers("aisha@student.edu")
+    sk = docker_skill["id"]
+    path = _setup_path(client, headers, sk, student_id)
+    comp = path["items"][0]["competency"]
+    lesson_url = f"/api/students/{student_id}/learning/{sk}/lessons/{comp}"
+    client.post(f"{lesson_url}/generate", json={}, headers=headers)
+    client.post(f"{lesson_url}/start", json={}, headers=headers)
+    lesson = client.get(lesson_url, headers=headers).json()
+    questions = lesson["content"]["mini_check"]["questions"]
+    client.post(
+        f"{lesson_url}/mini-check",
+        json={"answers": [q["correct_answer"] for q in questions]},
+        headers=headers)
+
+    models.update_lesson_state(student_id, path["id"], comp, "in_progress", None)
+    reopened = models.get_lesson(student_id, path["id"], comp)
+    assert reopened["state"] == "in_progress"
+    assert reopened["mini_check_result"] is None
+    assert reopened["completed_at"] is None
+
+
 # ------------------------------------------------------------------ 9. verified_skills safety
 
 def test_mini_check_does_not_update_verified_skills(client, docker_skill, student_id, auth_headers):
@@ -757,11 +818,9 @@ def test_generate_lesson_fallback_title_uses_humanized_label():
 
 
 def test_served_lesson_example_code_is_fenced_while_stored_content_is_untouched(
-        client, student_id, auth_headers):
-    """Use Git skill (no curated topics) to test fallback lesson fencing."""
+        client, docker_skill, student_id, auth_headers):
     headers = auth_headers("aisha@student.edu")
-    git = models.get_skill_by_name("Git")
-    sk = git["id"]
+    sk = docker_skill["id"]
     path = _setup_path(client, headers, sk, student_id)
     item = path["items"][0]
     code_content = (
@@ -786,21 +845,20 @@ def test_served_lesson_example_code_is_fenced_while_stored_content_is_untouched(
     }
     models.create_lesson(
         student_id=student_id, skill_id=sk, path_id=path["id"],
-        competency=item["competency"], title=f"{git['name']} > {item['competency']}",
+        competency=item["competency"], title=f"{sk} > {item['competency']}",
         action="learn", content_json=slug_content)
     r = client.get(
         f"/api/students/{student_id}/learning/{sk}/lessons/{item['competency']}",
         headers=headers)
     assert r.status_code == 200
     served = r.json()["content"]
-    # Title is humanized from stored content
     assert served["learn"]["title"] == "What is Statistics Fundamentals?"
     assert served["example"]["title"] == "Statistics Fundamentals in Practice"
     assert served["example"]["content"].startswith("```\n")
     assert "\ntotal_revenue = df['revenue'].sum()\n" in served["example"]["content"]
     assert served["practice"]["title"] == "Practice: Statistics Fundamentals"
     assert served["practice"]["competency"] == "statistics_fundamentals"
-    # Stored row is never rewritten
+    # stored row is never rewritten
     stored = models.get_lesson(student_id, path["id"], item["competency"])
     assert stored["content"]["learn"]["title"] == "What is statistics_fundamentals?"
     assert stored["content"]["example"]["content"] == code_content

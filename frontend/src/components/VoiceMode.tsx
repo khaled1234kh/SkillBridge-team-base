@@ -4,7 +4,7 @@ import type { TutorProfile } from '../lib/tutorProfiles'
 import type { VoiceSessionApi } from '../hooks/useVoiceSession'
 import type { LangStrings } from '../lib/tutorI18n'
 import { MOCKUP_VOICE_SUB } from '../lib/voiceStates'
-import { IconKeyboard, IconMic, IconStop, IconXClose, IconClock } from './Icons'
+import { IconKeyboard, IconMic, IconStop, IconXClose, IconClock, IconCheck } from './Icons'
 import { MentorOrb } from './MentorOrb'
 import type { MentorOrbState } from './MentorOrb'
 import { getToken } from '../lib/api'
@@ -273,12 +273,17 @@ export function VoiceMode({ voice, tutor, lang, ui, studentId, onClose }: {
   const errorText =
     voice.errorKind === 'mic' ? ui.micDeclined
       : voice.errorKind === 'connection' ? ui.connectionLost
-        : voice.error
+        : voice.errorKind === 'tts' || voice.errorKind === 'voice-unavailable' ? ui.voiceUnavailable
+          : voice.error
 
   // Engine state remains the single source of truth. While an error is set the
   // orb shows the calm ERROR/… visual and the state line carries the error text
   // instead of "Ready"; otherwise the orb mirrors the engine state 1:1.
   const orbState: MentorOrbState = voice.error ? 'error' : voice.state
+
+  // Phase 4D finishing state for the summary fetch.
+  const [finishing, setFinishing] = useState(false)
+  const summary = voice.interviewSummary
 
   const statusText =
     voice.error && voice.errorKind !== 'voice-unavailable' ? errorText
@@ -300,6 +305,16 @@ export function VoiceMode({ voice, tutor, lang, ui, studentId, onClose }: {
         : "Didn't catch that — hold and try again")
     }
   }, [serverStt, voice, lang, showHint])
+
+  const onFinishInterview = useCallback(async () => {
+    if (finishing) return
+    setFinishing(true)
+    try {
+      await voice.finishInterview()
+    } finally {
+      setFinishing(false)
+    }
+  }, [finishing, voice])
 
   // Fresh callback for the window-level release handlers (avoids re-binding on
   // every render while remaining point-in-time accurate).
@@ -445,28 +460,57 @@ export function VoiceMode({ voice, tutor, lang, ui, studentId, onClose }: {
           <span className="v-live-tag">{ui.voiceLiveTag}</span>
         </div>
 
-        <div className="v-lang" role="group" aria-label={ui.voiceLanguage}>
-          <button
-            type="button"
-            className={`v-lang-btn${voice.language === 'en' ? ' is-active' : ''}`}
-            onClick={() => voice.setLanguage('en')}
-            aria-pressed={voice.language === 'en'}
-          >
-            EN
-          </button>
-          <span className="v-lang-sep" aria-hidden="true">|</span>
-          <button
-            type="button"
-            className={`v-lang-btn${voice.language === 'ar' ? ' is-active' : ''}`}
-            onClick={() => voice.setLanguage('ar')}
-            aria-pressed={voice.language === 'ar'}
-          >
-            عربي
-          </button>
+        <div className="v-top-end">
+          <div className="v-lang" role="group" aria-label={ui.voiceLanguage}>
+            <button
+              type="button"
+              className={`v-lang-btn${voice.language === 'en' ? ' is-active' : ''}`}
+              onClick={() => voice.setLanguage('en')}
+              aria-pressed={voice.language === 'en'}
+            >
+              EN
+            </button>
+            <span className="v-lang-sep" aria-hidden="true">|</span>
+            <button
+              type="button"
+              className={`v-lang-btn${voice.language === 'ar' ? ' is-active' : ''}`}
+              onClick={() => voice.setLanguage('ar')}
+              aria-pressed={voice.language === 'ar'}
+            >
+              عربي
+            </button>
+          </div>
+
+          <div className="v-mode" role="group" aria-label={ui.voiceMode}>
+            <button
+              type="button"
+              className={`v-mode-btn${voice.mode === 'chat' ? ' is-active' : ''}`}
+              onClick={() => voice.setMode('chat')}
+              aria-pressed={voice.mode === 'chat'}
+            >
+              {ui.voiceModeConversation}
+            </button>
+            <button
+              type="button"
+              className={`v-mode-btn${voice.mode === 'interview' ? ' is-active' : ''}`}
+              onClick={() => voice.setMode('interview')}
+              aria-pressed={voice.mode === 'interview'}
+            >
+              {ui.voiceModeInterview}
+            </button>
+          </div>
         </div>
       </header>
 
       <div className="v-center">
+        {summary ? (
+          <div className="v-summary" role="region" aria-label={ui.voiceSummaryTitle}>
+            <h2 className="v-summary-title">{ui.voiceSummaryTitle}</h2>
+            <p className="v-summary-sub">{ui.voiceSummarySub}</p>
+            <div className="v-summary-body" dir={messageDir(summary)}>{summary}</div>
+          </div>
+        ) : (
+          <>
         <div className="ml-orb-wrap">
           <MentorOrb
             mentorId={tutor.id}
@@ -532,14 +576,42 @@ export function VoiceMode({ voice, tutor, lang, ui, studentId, onClose }: {
         </div>
 
         {err && <div className="v-err">{err}</div>}
+          </>
+        )}
       </div>
 
       <footer className="v-bottom">
         <div className="v-dock">
+          {summary ? (
+            <>
+              <button type="button" className="v-mode-summary-done" onClick={onClose} aria-label={ui.voiceSummaryDone}>
+                <IconCheck size={18} />
+                <span className="v-kbd-label">{ui.voiceSummaryDone}</span>
+              </button>
+              <button type="button" className="v-end" onClick={() => { voice.stop(); onClose() }} aria-label={ui.voiceEnd}>
+                <IconStop size={15} />
+                <span className="v-end-label">{ui.voiceEnd}</span>
+              </button>
+            </>
+          ) : (
+            <>
           <button type="button" className="v-keyboard" onClick={onClose} aria-label={ui.voiceKeyboard}>
             <IconKeyboard size={20} />
             <span className="v-kbd-label">{ui.voiceTypeInstead}</span>
           </button>
+
+          {voice.mode === 'interview' && (
+            <button
+              type="button"
+              className="v-finish"
+              onClick={() => void onFinishInterview()}
+              disabled={finishing}
+              aria-label={ui.voiceFinishInterview}
+            >
+              <IconCheck size={15} />
+              <span className="v-finish-label">{finishing ? (lang === 'ar' ? '…جارٍ التجهيز' : 'Preparing…') : ui.voiceFinishInterview}</span>
+            </button>
+          )}
 
           <button
             type="button"
@@ -559,6 +631,8 @@ export function VoiceMode({ voice, tutor, lang, ui, studentId, onClose }: {
             <IconStop size={15} />
             <span className="v-end-label">{ui.voiceEnd}</span>
           </button>
+            </>
+          )}
         </div>
       </footer>
     </div>

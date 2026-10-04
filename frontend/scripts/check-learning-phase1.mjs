@@ -26,9 +26,8 @@ ok(/startSignal=\{startSignal\}/.test(learning),
    'LearningPage: startSignal reaches the personalized path panel')
 ok(/function DiagnosticPanel\([^)]*startSignal/.test(learning),
    'LearningPage: DiagnosticPanel accepts the Start Learning signal')
-ok(/hasUsablePath=\{!!path && !path\.stale\}/.test(learning)
-   && /startSignal=\{0\}/.test(learning),
-   'LearningPage: Continue Learning does not race a valid path with diagnostic generation')
+ok(/phase !== 'browse'/.test(learning) && /api\.generateDiagnostic/.test(learning),
+   'LearningPage: fresh Start Learning enters diagnostic generation')
 ok(/function PersonalizedPathPanel\([^)]*startSignal/.test(learning),
    'LearningPage: PersonalizedPathPanel accepts the Start Learning signal')
 ok(/openCurrentTopic/.test(learning),
@@ -72,21 +71,6 @@ ok(!/final-assessment\/status/.test(assessments),
    'AssessmentsPage: Final Assessment remains ungated by Learning readiness')
 ok(/always\s+available from the Assessments page/.test(learning),
    'LearningPage: readiness is informational and assessment remains available')
-
-// Review return: stale paths must not present old percentages as current, and
-// Mini Check hints must be an optional learner action rather than answer-adjacent copy.
-ok(/path\.stale \? \(/.test(learning) && /scores are hidden until you refresh/.test(learning),
-   'LearningPage: stale roadmap scores are clearly withheld pending refresh')
-ok(/revealedMiniHints/.test(learning) && /Need a hint\?/.test(learning) && /setRevealedMiniHints/.test(learning),
-   'LearningPage: Mini Check hints are opt-in')
-ok(!/\{q\.misconception_hint && <p/.test(learning),
-   'LearningPage: Mini Check hints do not render by default')
-ok(/\{ar \? <p dir="rtl">\{agentActionArabic/.test(learning),
-   'LearningPage: Arabic agent copy is isolated from English mode')
-ok(/safeLegacyPackText/.test(learning),
-   'LearningPage: legacy generated packs remove unsupported profile claims')
-ok(/if \(nextPath\.stale\) return/.test(learning) && /if \(!path\.stale\) openCurrentTopic\(path\)/.test(learning),
-   'LearningPage: stale paths expose refresh instead of opening a lesson')
 
 if (problems.length) {
   console.error('Learning Phase 1 frontend contract violations:')

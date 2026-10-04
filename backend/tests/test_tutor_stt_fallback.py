@@ -53,20 +53,20 @@ def test_stt_requires_login(client):
     assert r.status_code == 401
 
 
-def test_stt_missing_audio_is_400(client, auth_headers, student_id):
+def test_stt_missing_audio_is_400(client, auth_headers):
     h = auth_headers("aisha@student.edu")
-    r = _post_stt(client, h, student_id, {"language": "en"})
+    r = _post_stt(client, h, 1, {"language": "en"})
     assert r.status_code == 400
 
 
-def test_stt_invalid_base64_is_400(client, auth_headers, student_id):
+def test_stt_invalid_base64_is_400(client, auth_headers):
     h = auth_headers("aisha@student.edu")
-    r = _post_stt(client, h, student_id, {"audio": "!!not-base64!!", "language": "en"})
+    r = _post_stt(client, h, 1, {"audio": "!!not-base64!!", "language": "en"})
     assert r.status_code == 400
     assert "Invalid base64 audio" in r.json()["detail"]
 
 
-def test_stt_transcribes_wav(monkeypatch, client, auth_headers, student_id):
+def test_stt_transcribes_wav(monkeypatch, client, auth_headers):
     import speech_recognition as sr
     from app import main
 
@@ -80,7 +80,7 @@ def test_stt_transcribes_wav(monkeypatch, client, auth_headers, student_id):
 
     monkeypatch.setattr(sr.Recognizer, "recognize_google", fake_recognize)
     h = auth_headers("aisha@student.edu")
-    r = _post_stt(client, h, student_id, {
+    r = _post_stt(client, h, 1, {
         "audio": base64.b64encode(_wav_bytes()).decode(),
         "language": "en",
     })
@@ -91,7 +91,7 @@ def test_stt_transcribes_wav(monkeypatch, client, auth_headers, student_id):
     assert captured["sample_width"] == 2
 
 
-def test_stt_arabic_uses_ar_eg(monkeypatch, client, auth_headers, student_id):
+def test_stt_arabic_uses_ar_eg(monkeypatch, client, auth_headers):
     import speech_recognition as sr
 
     captured = {}
@@ -102,7 +102,7 @@ def test_stt_arabic_uses_ar_eg(monkeypatch, client, auth_headers, student_id):
 
     monkeypatch.setattr(sr.Recognizer, "recognize_google", fake_recognize)
     h = auth_headers("aisha@student.edu")
-    r = _post_stt(client, h, student_id, {
+    r = _post_stt(client, h, 1, {
         "audio": base64.b64encode(_wav_bytes()).decode(),
         "language": "ar",
     })
@@ -111,7 +111,7 @@ def test_stt_arabic_uses_ar_eg(monkeypatch, client, auth_headers, student_id):
     assert captured["language"] == "ar-EG"
 
 
-def test_stt_unknown_audio_returns_empty_text(monkeypatch, client, auth_headers, student_id):
+def test_stt_unknown_audio_returns_empty_text(monkeypatch, client, auth_headers):
     import speech_recognition as sr
 
     def no_speech(self, audio_data, language="en-US", **kw):
@@ -119,12 +119,12 @@ def test_stt_unknown_audio_returns_empty_text(monkeypatch, client, auth_headers,
 
     monkeypatch.setattr(sr.Recognizer, "recognize_google", no_speech)
     h = auth_headers("aisha@student.edu")
-    r = _post_stt(client, h, student_id, {"audio": base64.b64encode(_wav_bytes()).decode(), "language": "en"})
+    r = _post_stt(client, h, 1, {"audio": base64.b64encode(_wav_bytes()).decode(), "language": "en"})
     assert r.status_code == 200
     assert r.json() == {"text": ""}
 
 
-def test_stt_service_down_is_503(monkeypatch, client, auth_headers, student_id):
+def test_stt_service_down_is_503(monkeypatch, client, auth_headers):
     import speech_recognition as sr
 
     def service_down(self, audio_data, language="en-US", **kw):
@@ -132,9 +132,24 @@ def test_stt_service_down_is_503(monkeypatch, client, auth_headers, student_id):
 
     monkeypatch.setattr(sr.Recognizer, "recognize_google", service_down)
     h = auth_headers("aisha@student.edu")
-    r = _post_stt(client, h, student_id, {"audio": base64.b64encode(_wav_bytes()).decode(), "language": "en"})
+    r = _post_stt(client, h, 1, {"audio": base64.b64encode(_wav_bytes()).decode(), "language": "en"})
     assert r.status_code == 503
-    assert "STT service unavailable" in r.json()["detail"]
+    assert r.json()["detail"] == "STT service unavailable"
+    assert "google unreachable" not in r.json()["detail"]
+
+
+def test_stt_unexpected_provider_error_is_safe(monkeypatch, client, auth_headers):
+    import speech_recognition as sr
+
+    def unexpected_error(self, audio_data, language="en-US", **kw):
+        raise RuntimeError("provider token=not-for-students")
+
+    monkeypatch.setattr(sr.Recognizer, "recognize_google", unexpected_error)
+    h = auth_headers("aisha@student.edu")
+    r = _post_stt(client, h, 1, {"audio": base64.b64encode(_wav_bytes()).decode(), "language": "en"})
+    assert r.status_code == 500
+    assert r.json()["detail"] == "Speech-to-text failed"
+    assert "not-for-students" not in r.json()["detail"]
 
 
 def test_stt_rejects_other_students(client, auth_headers):

@@ -1219,7 +1219,9 @@ def create_student(name, email, university, user_id=None, education_level=None):
 
 
 def update_student(student_id, **fields):
-    allowed = {"name", "email", "university", "target_role_id", "cv_filename", "cohort_confirmed", "share_public", "education_level"}
+    allowed = {"name", "email", "university", "target_role_id",
+               "cv_filename", "cv_text", "cohort_confirmed", "share_public",
+               "education_level"}
     sets, vals = [], []
     for k, v in fields.items():
         if k in allowed and v is not None:
@@ -1398,6 +1400,39 @@ def create_tutor_conversation(student_id, tutor_id, title=None):
         )
         row = c.execute("SELECT * FROM tutor_conversations WHERE id=?", (cur.lastrowid,)).fetchone()
         return _conversation_payload(row, message_count=0, preview="")
+
+
+def set_tutor_conversation_meta(student_id, conversation_id, mode=None, language=None):
+    """Record the last resolved session metadata on a conversation thread.
+
+    Phase 4D: Live mode (chat/practice/discuss/interview) and the resolved reply
+    language are persisted per thread so History can show what kind of session
+    happened. Each argument is optional; only provided values are written.
+    """
+    if conversation_id is None:
+        return False
+    with get_cursor() as c:
+        row = c.execute(
+            "SELECT id FROM tutor_conversations WHERE student_id = ? AND id = ?",
+            (student_id, conversation_id),
+        ).fetchone()
+        if not row:
+            return False
+        sets, params = [], []
+        if mode is not None:
+            sets.append("mode = ?")
+            params.append(mode)
+        if language is not None:
+            sets.append("language = ?")
+            params.append(language)
+        if not sets:
+            return True
+        sets.append("updated_at = COALESCE(updated_at, datetime('now'))")
+        c.execute(
+            f"UPDATE tutor_conversations SET {', '.join(sets)} WHERE id = ? AND student_id = ?",
+            (*params, conversation_id, student_id),
+        )
+        return True
 
 
 def get_tutor_conversation(student_id, conversation_id):
@@ -1753,6 +1788,117 @@ def set_copilot_onboarding(student_id, state, source, answers=None):
                        answered_at=excluded.answered_at""",
                   (student_id, state, source, json.dumps(answers or [])))
     return get_copilot_onboarding(student_id)
+
+
+TOUR_VERSION = "v1"
+TOUR_PAGES = ("roles", "learning", "assessments")
+TOUR_WELCOME_STATES = ("not_seen", "active", "completed", "skipped")
+TOUR_MINI_STATES = ("not_seen", "completed")
+
+
+def get_student_tour_state(student_id):
+    """The student's server-side product tour state, or a synthetic default.
+
+    This row is the source of truth for the welcome tour and the contextual
+    mini-tours (Phase 4 backend requirement); localStorage is only an optional
+    UI cache. A never-written student reads back ``not_seen`` with empty mini
+    states so a brand-new account sees the welcome tour exactly once.
+    """
+    with get_cursor() as c:
+        row = c.execute(
+            "SELECT student_id, tour_version, welcome_state, dont_show_again, "
+            "mini_states_json, updated_at FROM student_tour_state WHERE student_id=?",
+            (student_id,)).fetchone()
+    if not row:
+        return {"student_id": student_id, "tour_version": TOUR_VERSION,
+                "welcome_state": "not_seen", "dont_show_again": False,
+                "mini_states": {}, "updated_at": None, "default": True}
+    d = dict(row)
+    d["dont_show_again"] = bool(d["dont_show_again"])
+    raw = d.pop("mini_states_json", None)
+    try:
+        mini = json.loads(raw or "{}")
+    except Exception:
+        mini = {}
+    d["mini_states"] = mini if isinstance(mini, dict) else {}
+    d["default"] = False
+    return d
+
+
+def set_student_tour_state(student_id, tour_version=None, welcome_state=None,
+                           dont_show_again=None, mini_states=None):
+    """Upsert part/all of the student's tour state (backend is the truth).
+
+    ``welcome_state`` / page-state values must already be validated by the
+    caller against the allowed vocabularies. ``mini_states`` (if given) is
+    merged over the existing map so a partial page update never wipes other
+    pages. Returns the fresh full state.
+    """
+    with get_cursor() as c:
+        cur = get_student_tour_state(student_id)
+        ver = tour_version if tour_version is not None else cur["tour_version"]
+        ws = welcome_state if welcome_state is not None else cur["welcome_state"]
+        dsa = dont_show_again if dont_show_again is not None else cur["dont_show_again"]
+        mini = dict(cur["mini_states"])
+        if mini_states:
+            mini.update(mini_states)
+        c.execute(
+            """INSERT INTO student_tour_state
+               (student_id, tour_version, welcome_state, dont_show_again,
+                mini_states_json, updated_at)
+               VALUES (?,?,?,?,?, datetime('now'))
+               ON CONFLICT(student_id) DO UPDATE SET
+                 tour_version=excluded.tour_version,
+                 welcome_state=excluded.welcome_state,
+                 dont_show_again=excluded.dont_show_again,
+                 mini_states_json=excluded.mini_states_json,
+                 updated_at=excluded.updated_at""",
+            (student_id, ver, ws, 1 if dsa else 0, json.dumps(mini)))
+    return get_student_tour_state(student_id)
+
+
+MENTOR_UI_DEFAULT_VISIBLE = True
+
+
+def get_mentor_ui_preference(student_id):
+    """The student's server-side mentor-panel visibility preference.
+
+    Phase 5 backend requirement: the chosen show/hide state must persist per
+    authenticated student on the server (the Copilot panel is localStorage-free
+    by contract), so the compact launcher state survives a refresh. A
+    never-written student reads back ``panel_visible: True`` so the mentor
+    simply stays visible exactly as before this phase.
+    """
+    with get_cursor() as c:
+        row = c.execute(
+            "SELECT student_id, panel_visible, updated_at "
+            "FROM mentor_ui_preferences WHERE student_id=?",
+            (student_id,)).fetchone()
+    if not row:
+        return {"student_id": student_id, "panel_visible": MENTOR_UI_DEFAULT_VISIBLE,
+                "updated_at": None, "default": True}
+    d = dict(row)
+    d["panel_visible"] = bool(d["panel_visible"])
+    d["default"] = False
+    return d
+
+
+def set_mentor_ui_preference(student_id, panel_visible):
+    """Upsert the mentor-panel visibility flag (backend is the truth).
+
+    ``panel_visible`` must already be a bool by the caller. Returns the fresh
+    full preference row.
+    """
+    with get_cursor() as c:
+        c.execute(
+            """INSERT INTO mentor_ui_preferences
+               (student_id, panel_visible, updated_at)
+               VALUES (?,?, datetime('now'))
+               ON CONFLICT(student_id) DO UPDATE SET
+                 panel_visible=excluded.panel_visible,
+                 updated_at=excluded.updated_at""",
+            (student_id, 1 if panel_visible else 0))
+    return get_mentor_ui_preference(student_id)
 
 
 def mark_copilot_manual(student_id):
@@ -2294,20 +2440,6 @@ def get_latest_diagnostic(student_id, skill_id):
             (student_id, skill_id)).fetchone())
 
 
-def get_latest_completed_diagnostic(student_id, skill_id):
-    """The most recent COMPLETED diagnostic for a (student, skill).
-
-    Only a completed diagnostic defines a topic-level result a personalized path
-    may belong to, so path-currency is judged against this, never against an
-    abandoned in-progress row."""
-    with get_cursor() as c:
-        return _row(c.execute(
-            """SELECT * FROM learning_diagnostics
-               WHERE student_id=? AND skill_id=? AND completed_at IS NOT NULL
-               ORDER BY id DESC LIMIT 1""",
-            (student_id, skill_id)).fetchone())
-
-
 def list_diagnostics(student_id, skill_id=None, completed_only=True):
     sql = "SELECT * FROM learning_diagnostics WHERE student_id=?"
     args = [student_id]
@@ -2407,6 +2539,20 @@ def update_path_progress(student_id, skill_id, progress):
     return get_personalized_path(student_id, skill_id)
 
 
+def get_latest_completed_diagnostic(student_id, skill_id):
+    """The most recent COMPLETED diagnostic for a (student, skill), or None.
+
+    A personalized path belongs to exactly one diagnostic.  Comparing this id
+    with a path's stored ``diagnostic_id`` is how currency ("stale") is decided.
+    """
+    with get_cursor() as c:
+        return _row(c.execute(
+            """SELECT * FROM learning_diagnostics
+               WHERE student_id=? AND skill_id=? AND completed_at IS NOT NULL
+               ORDER BY id DESC LIMIT 1""",
+            (student_id, skill_id)).fetchone())
+
+
 def _path_dict(d):
     if d is None:
         return None
@@ -2417,25 +2563,24 @@ def _path_dict(d):
     for row in all_rows:
         key = row.get("id") or row.get("competency") or row.get("stage")
         row["state"] = "done" if key in progress else (row.get("state") or "not_started")
-    latest_diag = get_latest_completed_diagnostic(d["student_id"], d["skill_id"])
+    latest_completed = get_latest_completed_diagnostic(d["student_id"], d["skill_id"])
+    latest_diagnostic_id = latest_completed["id"] if latest_completed else None
+    stale = (latest_diagnostic_id is not None
+             and d.get("diagnostic_id") is not None
+             and latest_diagnostic_id != d["diagnostic_id"])
     return {
         "id": d["id"],
         "student_id": d["student_id"],
         "skill_id": d["skill_id"],
         "diagnostic_id": d["diagnostic_id"],
+        "latest_diagnostic_id": latest_diagnostic_id,
+        "stale": stale,
         "required_level": d.get("required_level"),
         "items": items,
         "stages": stages,
         "skipped_mastered": _json_loads(d.get("skipped_mastered")) or [],
         "progress": progress,
         "created_at": d.get("created_at"),
-        # Path-currency rule: a path belongs to the diagnostic it was built from.
-        # When a NEWER completed diagnostic exists for the same skill, the path is
-        # stale and must be regenerated (or explicitly refreshed) before it is
-        # taught again. Exposed so the UI can offer the explicit recovery action.
-        "latest_diagnostic_id": latest_diag["id"] if latest_diag else d["diagnostic_id"],
-        "stale": bool(latest_diag and d.get("diagnostic_id") is not None
-                      and latest_diag["id"] != d["diagnostic_id"]),
     }
 
 
@@ -2479,20 +2624,13 @@ def _lesson_dict(d):
 
 def create_lesson(student_id, skill_id, path_id, competency, title, action, content_json):
     with get_cursor() as c:
-        # A lesson is unique per learner, path, and competency.  The browser can
-        # legitimately issue overlapping generate requests while a development
-        # React effect is remounted; make that race idempotent instead of
-        # turning the second request into a misleading 500.
-        c.execute(
-            """INSERT OR IGNORE INTO learning_lessons
+        cur = c.execute(
+            """INSERT INTO learning_lessons
                (student_id, skill_id, personalized_path_id, competency, title, action, content_json)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (student_id, skill_id, path_id, competency, title, action, _json_dumps(content_json)))
         return _lesson_dict(_row(c.execute(
-            """SELECT * FROM learning_lessons
-               WHERE student_id=? AND personalized_path_id=? AND competency=?
-               ORDER BY id DESC LIMIT 1""",
-            (student_id, path_id, competency)).fetchone()))
+            "SELECT * FROM learning_lessons WHERE id=?", (cur.lastrowid,)).fetchone()))
 
 
 def get_lesson(student_id, path_id, competency):
@@ -2506,7 +2644,6 @@ def get_lesson(student_id, path_id, competency):
 
 def update_lesson_state(student_id, path_id, competency, state, result_json=None):
     with get_cursor() as c:
-        completed_at = "datetime('now')" if state == "completed" else None
         if state == "completed":
             c.execute(
                 """UPDATE learning_lessons SET state=?, mini_check_result_json=?, completed_at=datetime('now')
@@ -2514,7 +2651,7 @@ def update_lesson_state(student_id, path_id, competency, state, result_json=None
                 (state, _json_dumps(result_json), student_id, path_id, competency))
         else:
             c.execute(
-                """UPDATE learning_lessons SET state=?, mini_check_result_json=?
+                """UPDATE learning_lessons SET state=?, mini_check_result_json=?, completed_at=NULL
                    WHERE student_id=? AND personalized_path_id=? AND competency=?""",
                 (state, _json_dumps(result_json), student_id, path_id, competency))
     return get_lesson(student_id, path_id, competency)
@@ -2603,24 +2740,6 @@ def list_practice_attempts(student_id, lesson_id, limit=None):
     with get_cursor() as c:
         rows = c.execute(sql, tuple(params)).fetchall()
         return [_practice_attempt_dict(_row(r)) for r in rows]
-
-
-def find_matching_practice_attempt(student_id, lesson_id, answer, practice_task):
-    """Return a prior valid evaluation for the exact same saved task and answer.
-
-    This is an evaluation cache, not a completion shortcut: it is scoped to the
-    student and lesson, compares the canonical task JSON as well as the answer,
-    and never includes incomplete/error rows because those are not persisted.
-    """
-    with get_cursor() as c:
-        row = c.execute(
-            """SELECT * FROM learning_practice_attempts
-               WHERE student_id=? AND lesson_id=? AND answer=? AND practice_task_json=?
-                 AND source IN ('ai', 'fallback')
-               ORDER BY id DESC LIMIT 1""",
-            (student_id, lesson_id, answer, _json_dumps(practice_task)),
-        ).fetchone()
-        return _practice_attempt_dict(_row(row))
 
 
 # ---------------------------------------------------------------- scenarios

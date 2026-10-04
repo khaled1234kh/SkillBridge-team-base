@@ -21,8 +21,12 @@ import {
   type WebcamDetector,
 } from '../lib/webcamIntegrity'
 import { GapPill } from '../components/widgets'
-import { IconAssessment, IconAlert, IconFlag, IconCheck, IconTrophy, IconClock, IconEye, IconShield, IconUsers, IconBack, IconTarget } from '../components/Icons'
+import { WhyThis } from '../components/learning'
+import { MiniTourBanner } from '../components/ProductTour'
+import { IconAssessment, IconAlert, IconFlag, IconCheck, IconTrophy, IconClock, IconEye, IconShield, IconUsers, IconBack, IconTarget, IconRefresh } from '../components/Icons'
 import { ToastRegion, useToast } from '../components/ui'
+
+const FINAL_ASSESSMENT_QUESTION_COUNT = 10
 
 function shuffle<T>(arr: T[]): T[] {
   const a = [...arr]
@@ -96,8 +100,8 @@ function makeIntegrityEvent(eventType: AssessmentIntegrityEventType, durationMs 
   }
 }
 
-function attemptCompetencyBreakdown(rawPerQuestion?: string): { competency: string; score: number; passed: boolean }[] {
-  const rows: any[] = safeParseJson(rawPerQuestion)
+function attemptCompetencyBreakdown(rawPerQuestion?: string | any[]): { competency: string; score: number; passed: boolean }[] {
+  const rows: any[] = Array.isArray(rawPerQuestion) ? rawPerQuestion : safeParseJson(rawPerQuestion)
   const by: Record<string, { count: number; correct: number }> = {}
   for (const p of rows) {
     const comp = (p && typeof p.competency === 'string' && p.competency.trim()) || ''
@@ -165,7 +169,7 @@ export default function AssessmentsPage({ initialSkillId, onFocusConsumed, backT
   initialSkillId?: number
   onFocusConsumed?: () => void
   backTo?: { key: string; label: string } | null
-  onNavigate?: (section: string, focus?: { skillId: number; roleTitle: string }) => void
+  onNavigate?: (section: string, focus?: { skillId: number; roleTitle: string; competency?: string }) => void
 }) {
   const { me, refreshStudent, applyCopilot } = useApp()
   const [analysis, setAnalysis] = useState<Analysis | null>(null)
@@ -173,8 +177,12 @@ export default function AssessmentsPage({ initialSkillId, onFocusConsumed, backT
   const [keepIds, setKeepIds] = useState<Set<number>>(new Set())
   const [allSkills, setAllSkills] = useState<Skill[]>([])
   const [loadError, setLoadError] = useState('')
+  const [retryKey, setRetryKey] = useState(0)
   const [evidenceId, setEvidenceId] = useState<number | null>(null)
   const [focusSkillName, setFocusSkillName] = useState('')
+  const [assessmentView, setAssessmentView] = useState<'choose' | 'history'>('choose')
+  const [showAllSkills, setShowAllSkills] = useState(false)
+  const [assessmentActive, setAssessmentActive] = useState(false)
   const toast = useToast()
 
   useEffect(() => {
@@ -196,6 +204,8 @@ export default function AssessmentsPage({ initialSkillId, onFocusConsumed, backT
     const name = allSkills.find((s) => s.id === id)?.name || ''
     if (!name) return
     setFocusSkillName(name)
+    setAssessmentView('choose')
+    setShowAllSkills(true)
     setKeepIds((prev) => { const n = new Set(prev); n.add(id); return n })
     requestAnimationFrame(() => {
       const el = document.querySelector(`[data-skill-id="${id}"]`)
@@ -210,6 +220,7 @@ export default function AssessmentsPage({ initialSkillId, onFocusConsumed, backT
 
   useEffect(() => {
     if (me?.student?.id) {
+      setLoadError('')
       api.analysis(me.student.id)
         .then(setAnalysis)
         .catch((e) => { console.error('[assessments] analysis failed:', e); setLoadError((p) => p || ('Failed to load gap analysis: ' + (e.message || e))) })
@@ -220,7 +231,7 @@ export default function AssessmentsPage({ initialSkillId, onFocusConsumed, backT
         .then(setAllSkills)
         .catch((e) => { console.error('[assessments] skills failed:', e); setLoadError((p) => p || ('Failed to load skills: ' + (e.message || e))) })
     }
-  }, [me])
+  }, [me, retryKey])
 
   if (!me?.student) return <div className="empty">Log in as a student to take assessments.</div>
   const viableSkills = (analysis?.skill_gaps || []).filter((g) => g.status !== 'strong')
@@ -235,6 +246,28 @@ export default function AssessmentsPage({ initialSkillId, onFocusConsumed, backT
   const browseSkills = allSkills.filter((s) => !gapSkillIds.has(s.id) || !renderedGaps.find((g) => g.skill_id === s.id))
   const showBrowse = viableSkills.length === 0 && allSkills.length > 0
 
+  // Single obvious primary action above the fold: the next real step is either
+  // the first assessable gap or, when nothing is open, the browse list.
+  const heroPrimary = analysis
+    ? viableSkills.length > 0
+      ? { skillId: viableSkills[0].skill_id, label: `Choose ${viableSkills[0].skill_name}` }
+      : browseSkills.length > 0
+        ? { skillId: browseSkills[0].id, label: 'Browse skills to verify' }
+        : null
+    : null
+  const scrollToSkill = (skillId: number) => {
+    setAssessmentView('choose')
+    setShowAllSkills(true)
+    requestAnimationFrame(() => {
+      const el = document.querySelector(`[data-skill-id="${skillId}"]`)
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        el.classList.add('asm-focus-flash')
+        setTimeout(() => el.classList.remove('asm-focus-flash'), 2600)
+      }
+    })
+  }
+
   const renderGap = (g: any) => {
     const last = attempts.filter((a) => a.skill_id === g.skill_id).sort((a, b) => b.id - a.id)[0]
     return (
@@ -242,20 +275,37 @@ export default function AssessmentsPage({ initialSkillId, onFocusConsumed, backT
         key={g.skill_id}
         gap={g}
         lastAttempt={last}
-        onActivate={() => keep(g.skill_id)}
-        onDeactivate={() => release(g.skill_id)}
+        onActivate={() => { keep(g.skill_id); setAssessmentActive(true) }}
+        onDeactivate={() => { release(g.skill_id); setAssessmentActive(false) }}
         onDone={() => { refreshStudent(); api.analysis(me.student!.id).then(setAnalysis); api.studentAssessments(me.student!.id).then(setAttempts) }}
         onError={(m) => toast.push(m, 'error')}
         onSuccess={(m) => toast.push(m)}
+        onNavigate={onNavigate}
       />
     )
   }
 
   const passedAttempts = attempts.filter((attempt) => attempt.passed).length
   const verifiedSkillIds = new Set(me.student.verified_skills.map((v) => v.skill_id))
+  const visibleGaps = showAllSkills ? renderedGaps : renderedGaps.slice(0, 3)
+  const visibleBrowse = showAllSkills ? browseSkills : browseSkills.slice(0, 3)
+  const hiddenSkillCount = showBrowse
+    ? Math.max(0, browseSkills.length - visibleBrowse.length)
+    : Math.max(0, renderedGaps.length - visibleGaps.length)
 
   return (
     <div className="assessment-page">
+      <MiniTourBanner
+        page="assessments"
+        compact
+        eyebrow="Assessments · First time here?"
+        title="Measure safely, then take the test"
+        points={[
+          'Practice mode is unlimited and never touches your verified levels.',
+          'A passed final attempt is the only thing that verifies a skill.',
+          'Every result on your profile page lists what passed and what to improve.',
+        ]}
+      />
       <nav className="crumbs" aria-label="Breadcrumbs">
         {backTo && (
           <button type="button" className="crumb-back" onClick={() => onNavigate?.(backTo.key)}>
@@ -270,11 +320,16 @@ export default function AssessmentsPage({ initialSkillId, onFocusConsumed, backT
           <span>Opened from your career journey — <b>{focusSkillName}</b> is highlighted below. Assessment results only ever change verification through a passed attempt.</span>
         </div>
       )}
-      <section className="assessment-hero">
+      <section className="assessment-hero hcard-hero">
         <div>
           <p className="eyebrow">Assessments</p>
           <h1>Turn claimed skills into verified evidence.</h1>
-          <p>Generated questions, integrity checks, and pass results continue to use the existing assessment pipeline.</p>
+          <p>Choose one skill, complete its assessment, and add trusted evidence to your profile.</p>
+          {heroPrimary && (
+            <button type="button" className="btn asm-hero-cta" onClick={() => scrollToSkill(heroPrimary.skillId)}>
+              <IconAssessment size={15} /> {heroPrimary.label}
+            </button>
+          )}
         </div>
         <div className="hero-metrics">
           <div className="hero-metric gaps">
@@ -290,25 +345,39 @@ export default function AssessmentsPage({ initialSkillId, onFocusConsumed, backT
             <p className="hero-metric-label">skills verified</p>
           </div>
         </div>
+        <div className="preflight" role="note">
+          <span className="preflight-item"><IconCheck size={14} /> {FINAL_ASSESSMENT_QUESTION_COUNT} questions per skill</span>
+          <span className="preflight-item"><IconCheck size={14} /> Score 70% or more passes</span>
+          <span className="preflight-item"><IconShield size={14} /> Camera integrity checks throughout</span>
+        </div>
       </section>
 
-      <div className="assessment-layout">
-        <section className="panel assessment-panel">
+      <nav className="focus-flow" aria-label="Assessment sections">
+        <button type="button" className={assessmentView === 'choose' ? 'active' : ''} aria-current={assessmentView === 'choose' ? 'step' : undefined} onClick={() => setAssessmentView('choose')}><span>01</span> Choose a skill</button>
+        <button type="button" className={assessmentView === 'history' ? 'active' : ''} aria-current={assessmentView === 'history' ? 'step' : undefined} disabled={assessmentActive} onClick={() => setAssessmentView('history')}><span>02</span> Results <small>{attempts.length}</small></button>
+      </nav>
+      <div className="assessment-layout focus-assessment-layout">
+        {assessmentView === 'choose' && <section className="panel assessment-panel">
           <div className="panel-head">
             <div>
               <div className="panel-title-row">
                 <span className="panel-title-icon"><IconAssessment size={15} /></span>
                 <h3 className="panel-title">Verify a skill</h3>
               </div>
-              <p className="panel-subtitle">Take a proctored 10-question assessment to move a skill from self-reported to Verified.</p>
+              <p className="panel-subtitle">Take a {FINAL_ASSESSMENT_QUESTION_COUNT}-question Final Assessment with local camera integrity checks to move a skill from self-reported to Verified.</p>
             </div>
           </div>
-          {loadError && <div className="error" style={{ marginBottom: 12 }}><IconAlert size={15} /> {loadError}</div>}
+          {loadError && (
+            <div className="error phase7-retry-notice" role="alert" style={{ marginBottom: 12, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><IconAlert size={15} /> {loadError}</span>
+              <button type="button" className="btn btn-sm btn-secondary" onClick={() => setRetryKey((k) => k + 1)}>Retry</button>
+            </div>
+          )}
           {renderedGaps.length === 0 && !showBrowse && (
             <div className="empty" style={{ margin: '12px 0' }}>No skill gaps to assess. Select a target role first to see tailored gaps.</div>
           )}
           <div className="verify-list">
-            {renderedGaps.map(renderGap)}
+            {visibleGaps.map(renderGap)}
             {showBrowse && (
               <>
                 <div className="info" style={{ whiteSpace: 'normal' }}>
@@ -317,73 +386,79 @@ export default function AssessmentsPage({ initialSkillId, onFocusConsumed, backT
                     ? 'You have no open skill gaps right now. You can still verify any skill below to strengthen your profile.'
                     : 'Set a target role to get tailored gap suggestions — or verify a skill directly below.'}
                 </div>
-                {browseSkills.map((s) => {
+                {visibleBrowse.map((s) => {
                   const last = attempts.filter((a) => a.skill_id === s.id).sort((a, b) => b.id - a.id)[0]
                   return (
                     <AssessmentStarter
                       key={s.id}
                       gap={{ skill_id: s.id, skill_name: s.name, category: s.category, required_level: 'Intermediate', student_level: null, status: 'missing', verified: false }}
                       lastAttempt={last}
-                      onActivate={() => {}}
-                      onDeactivate={() => {}}
+                      onActivate={() => setAssessmentActive(true)}
+                      onDeactivate={() => setAssessmentActive(false)}
                       onDone={() => { refreshStudent(); api.studentAssessments(me.student!.id).then(setAttempts); api.analysis(me.student!.id).then(setAnalysis) }}
                       onError={(m) => toast.push(m, 'error')}
                       onSuccess={(m) => toast.push(m)}
+                      onNavigate={onNavigate}
                     />
                   )
                 })}
               </>
             )}
           </div>
+          {hiddenSkillCount > 0 && <button type="button" className="focus-show-more" onClick={() => setShowAllSkills(true)}>Show {hiddenSkillCount} more skills <IconAssessment size={14} /></button>}
+          {showAllSkills && (renderedGaps.length > 3 || browseSkills.length > 3) && !assessmentActive && <button type="button" className="focus-show-more" onClick={() => setShowAllSkills(false)}>Show fewer skills</button>}
           <ToastRegion toasts={toast.toasts} dismiss={toast.dismiss} />
-        </section>
+        </section>}
 
-        <section className="panel assessment-panel">
+        {assessmentView === 'history' && <section className="panel assessment-panel">
           <div className="panel-head">
             <div>
               <div className="panel-title-row">
                 <span className="panel-title-icon"><IconTrophy size={15} /></span>
                 <h3 className="panel-title">Assessment history</h3>
               </div>
-              <p className="panel-subtitle">Every attempt, its score, and any integrity flags that were raised.</p>
+              <p className="panel-subtitle">Every attempt, its score, and any integrity flags that were raised. Score = correct answers ÷ total questions × 100 (rounded to 1 decimal by the backend); it is fixed at submission and is never recalculated. Integrity flags are metadata-only review notes, not proof of cheating.</p>
             </div>
           </div>
           {attempts.length === 0 ? (
             <div className="empty" style={{ margin: '12px 0' }}>No attempts recorded yet.</div>
           ) : (
-            <ul className="history-list">
-              {attempts.map((a) => {
-                const flags: IntegrityFlag[] = safeParseJson(a.flags)
-                const verified = a.passed && verifiedSkillIds.has(a.skill_id)
-                return (
-                  <li className="history-item" key={a.id}>
-                    <div className="history-top">
-                      <h4>{a.skill_name}</h4>
-                      <span className={`status-pill ${verified ? 'verified' : a.passed ? 'passed' : 'failed'}`}>
-                        {verified ? 'Verified' : a.passed ? 'Passed' : 'Failed'}
-                      </span>
-                    </div>
-                    {flags.length > 0 && (
-                      <div className="integrity-alert">
-                        <IconFlag size={14} /> {flags.length} integrity flag{flags.length === 1 ? '' : 's'} raised on this attempt.
-                      </div>
-                    )}
-                    <p className="history-meta">
-                      Score <strong className="history-score">{a.score}%</strong> · {a.level_before} → {a.level_after}
-                    </p>
-                    <button
-                      className="link-btn"
-                      onClick={() => setEvidenceId(evidenceId === a.id ? null : a.id)}
-                    >
-                      {evidenceId === a.id ? 'Hide evidence' : 'Evidence & competency breakdown'}
-                    </button>
-                    {evidenceId === a.id && <AttemptEvidence attempt={a} />}
-                  </li>
-                )
-              })}
-            </ul>
+            <div className="focus-results">
+              <p className="muted small">{attempts.length} attempt{attempts.length === 1 ? '' : 's'} recorded. Open a result only when you want its evidence.</p>
+                <ul className="history-list">
+                  {attempts.map((a) => {
+                    const flags: IntegrityFlag[] = safeParseJson(a.flags)
+                    const verified = a.passed && verifiedSkillIds.has(a.skill_id)
+                    return (
+                      <li className="history-item" key={a.id}>
+                        <div className="history-top">
+                          <h4>{a.skill_name}</h4>
+                          <span className={`status-pill ${verified ? 'verified' : a.passed ? 'passed' : 'failed'}`}>
+                            {verified ? 'Verified' : a.passed ? 'Passed' : 'Failed'}
+                          </span>
+                        </div>
+                        {flags.length > 0 && (
+                          <div className="integrity-alert">
+                            <IconFlag size={14} /> {flags.length} integrity flag{flags.length === 1 ? '' : 's'} raised on this attempt.
+                          </div>
+                        )}
+                        <p className="history-meta">
+                          Score <strong className="history-score">{a.score}%</strong> · {a.level_before} → {a.level_after}
+                        </p>
+                        <button
+                          className="link-btn"
+                          onClick={() => setEvidenceId(evidenceId === a.id ? null : a.id)}
+                        >
+                          {evidenceId === a.id ? 'Hide evidence' : 'Evidence & competency breakdown'}
+                        </button>
+                        {evidenceId === a.id && <AttemptEvidence attempt={a} />}
+                      </li>
+                    )
+                  })}
+                </ul>
+            </div>
           )}
-        </section>
+        </section>}
       </div>
     </div>
   )
@@ -399,7 +474,7 @@ const EMPTY_PRECHECK: CameraPrecheckState = {
   message: 'Camera not started.',
 }
 
-function AssessmentStarter({ gap, lastAttempt, onDone, onActivate, onDeactivate, onError, onSuccess }: { gap: any; lastAttempt?: AssessmentAttempt; onDone: () => void; onActivate: () => void; onDeactivate: () => void; onError?: (m: string) => void; onSuccess?: (m: string) => void }) {
+function AssessmentStarter({ gap, lastAttempt, onDone, onActivate, onDeactivate, onError, onSuccess, onNavigate }: { gap: any; lastAttempt?: AssessmentAttempt; onDone: () => void; onActivate: () => void; onDeactivate: () => void; onError?: (m: string) => void; onSuccess?: (m: string) => void; onNavigate?: (section: string, focus?: { skillId: number; roleTitle: string; competency?: string }) => void }) {
   const { me, setAssessmentActive } = useApp()
   const [mode, setMode] = useState<Mode>('idle')
   const [questions, setQuestions] = useState<QuizQuestion[]>([])
@@ -409,6 +484,7 @@ function AssessmentStarter({ gap, lastAttempt, onDone, onActivate, onDeactivate,
   const [practiceData, setPracticeData] = useState<any>(null)
   const [busy, setBusy] = useState(false)
   const [generating, setGenerating] = useState(false)
+  const [startError, setStartError] = useState('')
   const [current, setCurrent] = useState(0)
   const [confirmEnd, setConfirmEnd] = useState(false)
   const [elapsed, setElapsed] = useState(0)
@@ -679,6 +755,7 @@ function AssessmentStarter({ gap, lastAttempt, onDone, onActivate, onDeactivate,
     setOptOrder(null)
     setCameraError('')
     setCameraWarning('')
+    setStartError('')
     resetCameraEvents()
   }, [resetCameraEvents])
 
@@ -802,7 +879,14 @@ function AssessmentStarter({ gap, lastAttempt, onDone, onActivate, onDeactivate,
         })
         sessionStorage.removeItem(gatePendingKey(gap.skill_id))
       }
-      const res = await api.generateAssessment(me!.student!.id, gap.skill_id, { practice: false })
+      const res = await withTimeout(
+        api.generateAssessment(me!.student!.id, gap.skill_id, { practice: false, num_questions: FINAL_ASSESSMENT_QUESTION_COUNT }),
+        180000,
+        'Generating the assessment took too long. Check your connection and retry.',
+      )
+      if (!res.questions || res.questions.length === 0) {
+        throw new Error('the assessment returned no questions for this skill.')
+      }
       const idx = res.questions.map((_, i) => i)
       for (let i = idx.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1))
@@ -819,7 +903,9 @@ function AssessmentStarter({ gap, lastAttempt, onDone, onActivate, onDeactivate,
     } catch (e: any) {
       releaseLock()
       stopCamera()
-      onError?.('Failed to generate quiz: ' + e.message)
+      const message = e?.message || String(e)
+      setStartError('Could not start the assessment: ' + message)
+      onError?.('Failed to generate quiz: ' + message)
       setMode('idle')
       onDeactivate()
     } finally {
@@ -899,6 +985,9 @@ function AssessmentStarter({ gap, lastAttempt, onDone, onActivate, onDeactivate,
     if (current + 1 < questions.length) setCurrent((c) => c + 1)
     else submit()
   }
+  const previous = () => {
+    if (current > 0) setCurrent((c) => c - 1)
+  }
 
   const submit = async () => {
     setBusy(true)
@@ -976,23 +1065,49 @@ function AssessmentStarter({ gap, lastAttempt, onDone, onActivate, onDeactivate,
   }
 
   if (mode === 'camera_notice') {
+    const passRule = 70
+    const questionCount = FINAL_ASSESSMENT_QUESTION_COUNT
+    const approxMinutes = Math.max(5, Math.round(questionCount * 1))
     return (
-      <div className="learning-item open camera-consent-card">
+      <div className="learning-item open asm-landing">
         <div className="li-body" style={{ display: 'block', padding: 18 }}>
+          <p className="eyebrow">Verified Final Assessment</p>
+          <h3 style={{ marginBottom: 4 }}>{gap.skill_name}</h3>
+          <div className="asm-facts" role="note">
+            <span className="asm-fact"><IconCheck size={14} /> {questionCount} questions</span>
+            <span className="asm-fact"><IconClock size={14} /> No time limit · About {approxMinutes} minutes</span>
+            <span className="asm-fact"><IconTarget size={14} /> Pass at {passRule}% or more</span>
+          </div>
+          <div className="asm-what-changes">
+            <strong><IconShield size={14} /> What this result changes</strong>
+            <p className="small">
+              Pass to raise your {gap.skill_name} level and mark the skill as <b>Verified</b> on your
+              profile — this is the only way assessments affect your profile. Every attempt is recorded
+              in your history; a score below {passRule}% or an integrity flag leaves your level unchanged.
+            </p>
+          </div>
           <div className="camera-panel-head">
             <span className="camera-panel-icon"><IconShield size={18} /></span>
             <div>
               <h4>Camera integrity notice</h4>
               <p className="small muted">
-                This assessment uses your camera to support assessment integrity.
+                This Final Assessment uses your camera to support assessment integrity.
               </p>
             </div>
           </div>
           <p className="camera-copy">
-            During the assessment SkillBridge checks whether the camera remains active and may flag events such as no person being visible, multiple people appearing, or a phone being detected.
+            During the assessment SkillBridge checks whether the camera stays active and may raise review
+            signals such as no person being visible, more than one person appearing, or a phone being
+            detected. These checks run locally on your device.
           </p>
           <p className="camera-copy">
-            Video is not recorded or stored. Camera analysis is used only during the assessment.
+            Video is never recorded, stored or uploaded, and SkillBridge never identifies who you are —
+            there is no face recognition or identity matching. Integrity signals are metadata-only review
+            notes, not proof of cheating, and a flag by itself never changes your level.
+          </p>
+          <p className="camera-copy">
+            When you continue, your browser will ask for camera permission. Allow it so the pre-check can
+            confirm the camera works and that exactly one person is visible before the questions begin.
           </p>
           <div className="camera-actions">
             <button className="btn" onClick={cancelCameraFlow}>Cancel</button>
@@ -1063,7 +1178,7 @@ function AssessmentStarter({ gap, lastAttempt, onDone, onActivate, onDeactivate,
               )}
               {gateBlocked ? (
                 <div className="error" style={{ whiteSpace: 'normal' }}>
-                  <IconAlert size={15} /> The camera gate could not be completed after several attempts. The Final Assessment requires a working camera. Close any other app using it, check browser permissions, restart your browser, then start again.
+                  <IconAlert size={15} /> The camera gate could not be completed after several attempts. The Final Assessment requires a working camera, and there is no camera-free way to verify a skill — Practice review stays separate and never affects verification. Close any other app using the camera, check browser permissions, restart your browser, then start again.
                 </div>
               ) : cameraError ? (
                 <div className="error" style={{ whiteSpace: 'normal' }}>
@@ -1122,6 +1237,24 @@ function AssessmentStarter({ gap, lastAttempt, onDone, onActivate, onDeactivate,
           <div className="flex" style={{ justifyContent: 'flex-end' }}>
             <button className="btn" onClick={() => { setMode('idle'); onDeactivate() }}>Back</button>
             <button className="btn btn-primary" onClick={() => start(false)}><IconAssessment size={14} /> Redo for real</button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (mode === 'quiz' && !questions.length) {
+    return (
+      <div className="learning-item open" style={{ border: '1.5px solid var(--sb-red)' }}>
+        <div className="li-body" style={{ display: 'block', padding: 18 }}>
+          <h4 style={{ marginBottom: 6 }}>Could not load questions for {gap.skill_name}</h4>
+          <p className="small muted mb">
+            The assessment did not return any questions, so nothing was scored or saved. Retry to
+            generate a new attempt.
+          </p>
+          <div className="flex" style={{ justifyContent: 'flex-end' }}>
+            <button className="btn" onClick={() => { setMode('idle'); onDeactivate() }}>Back to skill list</button>
+            <button className="btn btn-primary" onClick={() => void start(false)}><IconRefresh size={14} /> Retry</button>
           </div>
         </div>
       </div>
@@ -1189,24 +1322,36 @@ function AssessmentStarter({ gap, lastAttempt, onDone, onActivate, onDeactivate,
           {q.type === 'multiple_choice' ? (
             chosen ? (
               <div className="flex run-cta">
-                <button className="btn btn-primary" onClick={next} disabled={busy}>
+                {current > 0 && (
+                  <button className="btn btn-ghost quiz-back" onClick={previous} disabled={busy} aria-label="Back to previous question">‹ Back</button>
+                )}
+                <button className="btn btn-primary quiz-next" onClick={next} disabled={busy} style={{ marginInlineStart: 'auto' }}>
                   {isLast ? (busy ? 'Submitting…' : 'Submit assessment') : `Next question ›`}
                 </button>
               </div>
             ) : (
               <div className="flex run-cta">
-                <button className="btn btn-primary" disabled>Select an answer</button>
+                {current > 0 && (
+                  <button className="btn btn-ghost quiz-back" onClick={previous} disabled={busy} aria-label="Back to previous question">‹ Back</button>
+                )}
+                <button className="btn btn-primary quiz-next" disabled style={{ marginInlineStart: 'auto' }}>Select an answer</button>
               </div>
             )
           ) : answered ? (
             <div className="flex run-cta">
-              <button className="btn btn-primary" onClick={next} disabled={busy}>
+              {current > 0 && (
+                <button className="btn btn-ghost quiz-back" onClick={previous} disabled={busy} aria-label="Back to previous question">‹ Back</button>
+              )}
+              <button className="btn btn-primary quiz-next" onClick={next} disabled={busy} style={{ marginInlineStart: 'auto' }}>
                 {isLast ? (busy ? 'Submitting…' : 'Submit assessment') : `Next question ›`}
               </button>
             </div>
           ) : (
             <div className="flex run-cta">
-              <button className="btn btn-primary" disabled>Type an answer to continue</button>
+              {current > 0 && (
+                <button className="btn btn-ghost quiz-back" onClick={previous} disabled={busy} aria-label="Back to previous question">‹ Back</button>
+              )}
+              <button className="btn btn-primary quiz-next" disabled style={{ marginInlineStart: 'auto' }}>Type an answer to continue</button>
             </div>
           )}
         </div>
@@ -1214,7 +1359,11 @@ function AssessmentStarter({ gap, lastAttempt, onDone, onActivate, onDeactivate,
           <div className="confirm-overlay" role="dialog" aria-modal="true" aria-labelledby="confirm-end-title">
             <div className="confirm-dialog">
               <h2 id="confirm-end-title">End this assessment early?</h2>
-              <p>Your attempt will be finalized with unanswered questions scored as zero. This cannot be undone.</p>
+              <p>
+                Your answers so far will be graded and saved as an attempt, and questions you didn't
+                answer count as zero. SkillBridge doesn't autosave mid-attempt drafts, so there is no
+                "return later" resume — you can start a new attempt any time from the skill list.
+              </p>
               <div className="confirm-actions">
                 <button className="btn btn-ghost" onClick={() => setConfirmEnd(false)} aria-label="Cancel ending assessment">Cancel</button>
                 <button className="btn btn-danger" disabled={busy} onClick={() => { setConfirmEnd(false); void finalizeNow() }}>
@@ -1240,6 +1389,12 @@ function AssessmentStarter({ gap, lastAttempt, onDone, onActivate, onDeactivate,
     const resultTitle = endedByIntegrity
       ? 'Assessment Ended'
       : result.passed ? `Assessment passed: ${gap.skill_name}` : `Not passed — keep learning ${gap.skill_name}`
+    const compRows = (Array.isArray(result.competencies) && result.competencies.length)
+      ? result.competencies
+      : attemptCompetencyBreakdown(result.per_question)
+    const strengths = compRows.filter((c: any) => c.passed).sort((a: any, b: any) => b.score - a.score).slice(0, 3)
+    const improve = compRows.filter((c: any) => !c.passed).sort((a: any, b: any) => a.score - b.score).slice(0, 3)
+    const roleTitleForPlan = (me?.student?.target_role as any)?.title || ''
     return (
       <div className="learning-item open" style={{ border: `1.5px solid ${result.passed ? 'var(--green)' : 'var(--red)'}` }}>
         <div className="li-body" style={{ display: 'block', padding: 18 }}>
@@ -1277,10 +1432,42 @@ function AssessmentStarter({ gap, lastAttempt, onDone, onActivate, onDeactivate,
                 <IconAlert size={15} /> This attempt ended early — unanswered questions were scored as zero.
               </div>
             )}
-            <div className="flex" style={{ gap: 8 }}>
+            <div className="result-focus-grid">
+              <div className="result-focus result-strengths">
+                <h5 className="small" style={{ textTransform: 'uppercase', letterSpacing: 0.06, marginBottom: 6 }}>Strengths</h5>
+                {strengths.length > 0 ? strengths.map((c: any) => (
+                  <span className="asm-chip strong" key={`s-${c.competency}`}><IconCheck size={12} /> {String(c.competency).replace(/_/g, ' ')} <b>{c.score}%</b></span>
+                )) : <p className="muted small">No strong areas to point out yet — pick the plan action below to build them.</p>}
+              </div>
+              <div className="result-focus result-improve">
+                <h5 className="small" style={{ textTransform: 'uppercase', letterSpacing: 0.06, marginBottom: 6 }}>Improvement areas</h5>
+                {improve.length > 0 ? improve.map((c: any) => (
+                  <span className="asm-chip warn" key={`i-${c.competency}`}><IconAlert size={12} /> {String(c.competency).replace(/_/g, ' ')} <b>{c.score}%</b></span>
+                )) : <p className="muted small">Nothing specific — stronger across everything you were asked.</p>}
+              </div>
+            </div>
+            <div className="flex result-actions-wrap" style={{ gap: 8 }}>
+              <button className="btn btn-primary asm-plan-cta" onClick={() => onNavigate?.('learning', { skillId: gap.skill_id, roleTitle: roleTitleForPlan, competency: improve[0]?.competency })} disabled={!onNavigate}>
+                <IconTarget size={14} /> {improve.length ? `Improve ${String(improve[0].competency).replace(/_/g, ' ')}` : `Open ${gap.skill_name} learning plan`}
+              </button>
               <button className="btn" onClick={() => { setMode('idle'); onDeactivate() }}>Back to skill list</button>
               {lastAttempt && <button className="btn" onClick={() => start(true)}><IconTrophy size={14} /> Practice review</button>}
             </div>
+          </div>
+          <details className="result-details">
+            <summary><IconEye size={14} /> View details</summary>
+            <div className="result-details-body">
+          <div className="info" style={{ whiteSpace: 'normal' }}>
+            <IconShield size={15} />
+            <span>
+              Score = questions answered correctly ÷ total questions × 100, rounded to 1 decimal by the
+              backend (shown here as a whole percent). It is fixed at submission and is not recalculated
+              later, so there is no separate recalculation time. Numerator: correct answers. Denominator:
+              every question in this attempt, including any left unanswered (scored as 0). Integrity is
+              reported separately from the score: camera and browser signals are metadata-only review notes,
+              not proof of cheating or an identity check. Only a passed attempt (overall 70% and, for a
+              full-coverage assessment, every required competency) marks the skill Verified on your profile.
+            </span>
           </div>
           {Array.isArray(result.competencies) && result.competencies.length > 0 && (
             <div style={{ marginTop: 14 }}>
@@ -1343,13 +1530,15 @@ function AssessmentStarter({ gap, lastAttempt, onDone, onActivate, onDeactivate,
               )
             })}
           </div>
+            </div>
+          </details>
         </div>
       </div>
     )
   }
 
   return (
-    <div className="verify-item" data-skill-id={gap.skill_id}>
+    <div className="verify-item hcard-info" data-skill-id={gap.skill_id}>
       <span className={`verify-icon ${categoryToneFor(gap.category)}`}>
         <IconAssessment size={17} />
       </span>
@@ -1360,10 +1549,22 @@ function AssessmentStarter({ gap, lastAttempt, onDone, onActivate, onDeactivate,
           {lastAttempt && (
             <>
               <span aria-hidden="true">·</span>
-              <span>Last score <strong>{lastAttempt.score}%</strong></span>
+              <span>Last score <strong>{lastAttempt.score}%</strong>{' '}
+                <WhyThis>
+                  Your most recent attempt on this skill. Numerator: questions answered correctly. Denominator:
+                  every question in that attempt. Fixed at submission — it is never recalculated. A retake
+                  scores a fresh attempt; only a pass marks the skill Verified.
+                </WhyThis>
+              </span>
             </>
           )}
         </div>
+        {startError && (
+          <div className="error" role="alert" style={{ marginTop: 8, whiteSpace: 'normal', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><IconAlert size={15} /> {startError}</span>
+            <button type="button" className="btn btn-sm btn-secondary" onClick={() => void start(false)}>Retry</button>
+          </div>
+        )}
       </div>
       {lastAttempt && (
         <div className="verify-lastscore">

@@ -2,50 +2,50 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Markdown from 'react-markdown'
 import { useApp } from '../AppContext'
 import { api } from '../lib/api'
+import { failureMessage } from '../lib/failureStates'
 import { humanizeTopicLabel } from '../lib/topicLabels'
-import type { ActivitySummary, Analysis, CareerRoadmap, DiagnosticQuestion, DiagnosticResult, 
-GeneratedDiagnostic, FinalAssessmentStatus, LearningItem, LearningResource, Lesson, LessonContent, LessonPractice, PersonalizedPath, PersonalizedPathItem, PersonalizedPathResponse, PracticeAttempt, ScenarioLibrary, ScenarioCard, SkillGap,
-TopicResult, LearningAgentDecision, Student } from '../lib/types'
+import type {
+  ActivitySummary, Analysis, CareerRoadmap, DiagnosticQuestion, DiagnosticResult,
+  GeneratedDiagnostic, FinalAssessmentStatus, LearningAgentActionType, LearningAgentDecision,
+  LearningItem, LearningResource, Lesson, LessonPractice, MiniCheckResult, PersonalizedPath,
+  PersonalizedPathItem, PersonalizedPathResponse, PracticeAttempt, ScenarioLibrary, ScenarioCard,
+  SkillGap, Student, TopicResult, RoadmapValidation, RoadmapViolation,
+} from '../lib/types'
 import {
   CareerProgress,
   ContinueLearningCard,
+  CurrentLessonCard,
   EmptyLearningState,
   LearningProgress,
   LearningTabs,
+  MilestoneChip,
   ResourceCard,
   RoadmapTimeline,
   SearchBar,
   SectionTitle,
   SkillCard,
   SkillDetailHeader,
+  stageMilestoneState,
+  topicMilestoneState,
   topicProgressFor,
+  WhyThis,
   type LearningTab,
 } from '../components/learning'
-import { IconArrowRight, IconAssessment, IconBack, IconBolt, IconBook, IconChat, IconCheck, IconChevron, IconClock, IconExternal, IconLock, IconRoadmap, IconShield, IconTarget } from '../components/Icons'
+import { MiniTourBanner } from '../components/ProductTour'
+import { IconAlert, IconArrowRight, IconAssessment, IconBack, IconBolt, IconBook, IconChat, IconCheck, IconChevron, IconClock, IconExternal, IconLock, IconRefresh, IconRoadmap, IconShield, IconTarget } from '../components/Icons'
 
 function SafeMarkdown({ children }: { children: React.ReactNode }) {
   return <Markdown>{String(children ?? '')}</Markdown>
 }
 
-/** Remove the known legacy resource-pack claim; it was generated from a profile
- * context but never evidenced student capability. New packs no longer generate it. */
-function safeLegacyPackText(value: unknown) {
-  return String(value ?? '')
-    .replace(/\n{0,2}You already have relevant foundations to build on\s*\([^)]*\),?\s*so the priority is applying[\s\S]*?shipping something small\./gi,
-      '\n\nBuild foundations through practice, then apply the skill through small, concrete exercises.')
-    .replace(/\bStudying at\s+[^;.)]+[;.)]?/gi, '')
-    .replace(/\bfocused on becoming\s+(?:a|an)\s+[^;.)]+[;.)]?/gi, '')
-}
-
-function resourceTypeLabel(resource: LearningResource, ar = false) {
-  if (ar) return resource.type === 'video' ? 'فيديو' : resource.type === 'article' ? 'مقال' : 'مصدر'
+function resourceTypeLabel(resource: LearningResource) {
   const label = resource.type_label || resource.type || 'Resource'
   if (label === 'doc') return 'Documentation'
   if (label === 'course') return 'Tutorial'
   return label.replace(/_/g, ' ').split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
 }
 
-function resourceStatus(resource: LearningResource, ar = false) {
+function resourceStatus(resource: LearningResource) {
   const label = resource.status
     || (resource.available === true
       ? 'Checked'
@@ -53,7 +53,7 @@ function resourceStatus(resource: LearningResource, ar = false) {
   const key = label.toLowerCase().includes('unavailable')
     ? 'unavailable'
     : label.toLowerCase().includes('checked') ? 'checked' : 'unknown'
-  return { label: ar ? (key === 'checked' ? 'تمت المراجعة' : key === 'unavailable' ? 'غير متاح' : 'الحالة غير معروفة') : label, key }
+  return { label, key }
 }
 
 function formatMinutes(mins: number) {
@@ -76,18 +76,244 @@ function categoryToneFor(category: string) {
   return 'slate'
 }
 
-type LearningSkill = SkillGap & { profileSource?: 'claimed' | 'verified' }
+// ------------------------------------------------------------------ agentic learning
+//
+// Phase 3: the learning agent recommends; it never grades, completes a topic or
+// verifies a skill. The language control is persistent (localStorage) so a
+// student who chose Egyptian Arabic keeps it across visits and pages.
+
+const LEARNING_LANGUAGE_KEY = 'sb_learning_language'
+type LearningLanguage = 'en' | 'ar'
+
+function useLearningLanguage(): [LearningLanguage, (next: LearningLanguage) => void] {
+  const [language, setLanguage] = useState<LearningLanguage>(() => {
+    try {
+      return localStorage.getItem(LEARNING_LANGUAGE_KEY) === 'ar' ? 'ar' : 'en'
+    } catch {
+      return 'en'
+    }
+  })
+  const update = useCallback((next: LearningLanguage) => {
+    setLanguage(next)
+    try { localStorage.setItem(LEARNING_LANGUAGE_KEY, next) } catch { /* storage may be unavailable */ }
+  }, [])
+  return [language, update]
+}
+
+type LessonTab = 'learn' | 'example' | 'practice' | 'discuss' | 'mini_check'
+
+const AGENT_ACTION_TABS: Record<LearningAgentActionType, LessonTab> = {
+  EXPLAIN: 'learn',
+  PRACTICE: 'practice',
+  GIVE_HINT: 'practice',
+  REVIEW_PREREQUISITE: 'learn',
+  MINI_CHECK: 'mini_check',
+  ADVANCE: 'learn',
+  REQUEST_REASSESSMENT: 'learn',
+}
+
+interface AgentCopy {
+  eyebrow: string
+  title: string
+  why: string
+  objective: string
+  evidence: string
+  open: string
+  staticLabel: string
+  noExec: string
+  staticSound: string
+  staticFix: string
+  retry: string
+  roadmap: string
+  reassess: string
+  submitNote: string
+  unverified: string
+  loading: string
+  english: string
+  egyptianArabic: string
+}
+
+const AGENT_COPY: Record<LearningLanguage, AgentCopy> = {
+  en: {
+    eyebrow: 'Learning agent',
+    title: 'Your next best step',
+    why: 'Why this step?',
+    objective: 'Objective',
+    evidence: 'Evidence',
+    open: 'Open this step',
+    staticLabel: 'Static code check / فحص ثابت للكود',
+    noExec: 'Python code is not executed here. This is a structural review only — it never changes your practice score and never verifies a skill.',
+    staticSound: 'The stored structural check looks sound, so a Mini Check can confirm understanding. It still does not run the code.',
+    staticFix: 'The stored structural check still finds missing structure. Revise the practice answer and try again.',
+    retry: 'Retry recommendation',
+    roadmap: 'View full roadmap',
+    reassess: 'Regenerate your path from the latest diagnostic, or retake the diagnostic to continue.',
+    submitNote: 'Practice answers and Mini Checks are submitted through the real lesson APIs; the agent only recommends.',
+    unverified: 'This recommendation never verifies a skill — only a passed Final Assessment can do that.',
+    loading: 'Choosing your next step…',
+    english: 'English',
+    egyptianArabic: 'العربية المصرية',
+  },
+  ar: {
+    eyebrow: 'وكيل التعلّم',
+    title: 'أفضل خطوة تالية',
+    why: 'لماذا هذه الخطوة؟',
+    objective: 'الهدف',
+    evidence: 'الأدلة',
+    open: 'افتح هذه الخطوة',
+    staticLabel: 'Static code check / فحص ثابت للكود',
+    noExec: 'لا يتم تنفيذ كود Python هنا. هذا فحص هيكلي فقط — لا يغيّر درجة التدريب ولا يوثّق المهارة.',
+    staticSound: 'الفحص الهيكلي المخزّن سليم، لذا يمكن إجراء الاختبار المصغّر للتأكد من الفهم. ولا يزال لا ينفّذ الكود.',
+    staticFix: 'لا يزال الفحص الهيكلي يجد بنية ناقصة. عدّل إجابة التدريب ثم حاول مرة أخرى.',
+    retry: 'أعد المحاولة',
+    roadmap: 'عرض خريطة الطريق كاملة',
+    reassess: 'أعد إنشاء مسارك من أحدث تشخيص، أو أعد التشخيص للمتابعة.',
+    submitNote: 'تُرسَل إجابات التدريب والاختبار المصغّر عبر واجهات الدرس الحقيقية؛ والوكيل يوصي فقط.',
+    unverified: 'هذه التوصية لا توثّق أي مهارة — فقط اجتياز التقييم النهائي يفعل ذلك.',
+    loading: 'جارٍ اختيار خطوتك التالية…',
+    english: 'English',
+    egyptianArabic: 'العربية المصرية',
+  },
+}
+
+function LearningAgentPanel({ studentId, skillId, onOpenTopic }: {
+  studentId: number
+  skillId: number
+  onOpenTopic: (competency: string, tab?: LessonTab) => void
+}) {
+  const [language, setLanguage] = useLearningLanguage()
+  const copy = AGENT_COPY[language]
+  const [agentDecision, setAgentDecision] = useState<LearningAgentDecision | null>(null)
+  const [latestAttempt, setLatestAttempt] = useState<PracticeAttempt | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [showEvidence, setShowEvidence] = useState(false)
+  const [retryKey, setRetryKey] = useState(0)
+
+  useEffect(() => {
+    let alive = true
+    setLoading(true)
+    setError('')
+    api.learningAgentNext(studentId, skillId)
+      .then((decision) => { if (alive) setAgentDecision(decision) })
+      .catch((e: unknown) => {
+        if (!alive) return
+        setAgentDecision(null)
+        setError((e as Error)?.message || 'Could not load the learning recommendation.')
+      })
+      .finally(() => { if (alive) setLoading(false) })
+    return () => { alive = false }
+  }, [studentId, skillId, retryKey])
+
+  const topic = agentDecision?.topic_id ?? null
+  useEffect(() => {
+    let alive = true
+    if (!topic) { setLatestAttempt(null); return () => { alive = false } }
+    api.lessonPracticeAttempts(studentId, skillId, topic)
+      .then((res) => { if (alive) setLatestAttempt(res.latest) })
+      .catch(() => { if (alive) setLatestAttempt(null) })
+    return () => { alive = false }
+  }, [studentId, skillId, topic, retryKey])
+
+  const staticCheck = latestAttempt?.practice_task?.static_check ?? null
+  const structurallySound = latestAttempt?.practice_task?.static_check?.status === 'looks_structurally_sound'
+
+  return (
+    <section className="agent-panel hcard-ai" aria-label="Learning agent recommendation">
+      <div className="agent-head">
+        <div className="panel-title-row">
+          <span className="panel-title-icon"><IconBolt size={15} /></span>
+          <div>
+            <span className="eyebrow">{copy.eyebrow}</span>
+            <h3 className="panel-title">{copy.title}</h3>
+          </div>
+        </div>
+        <div className="agent-lang" role="group" aria-label="Learning language">
+          <button type="button" className={`agent-lang-btn ${language === 'en' ? 'active' : ''}`}
+                  aria-pressed={language === 'en'} onClick={() => setLanguage('en')}>{copy.english}</button>
+          <button type="button" className={`agent-lang-btn ${language === 'ar' ? 'active' : ''}`}
+                  aria-pressed={language === 'ar'} onClick={() => setLanguage('ar')}>{copy.egyptianArabic}</button>
+        </div>
+      </div>
+
+      {loading && <p className="muted small agent-status" role="status">{copy.loading}</p>}
+
+      {error && (
+        <div className="agent-error" role="alert">
+          <span>{error}</span>
+          <button type="button" className="btn btn-sm" onClick={() => setRetryKey((k) => k + 1)}>{copy.retry}</button>
+        </div>
+      )}
+
+      {agentDecision && (
+        <>
+          <div className="agent-decision">
+            <span className="chip-btn agent-action-chip" data-action={agentDecision.action_type}>{agentDecision.action_type}</span>
+            <p className="agent-next-step">{agentDecision.next_step}</p>
+            {agentDecision.objective && (
+              <p className="muted small"><strong>{copy.objective}:</strong> {agentDecision.objective}</p>
+            )}
+          </div>
+
+          <button type="button" className="btn-link agent-why" aria-expanded={showEvidence}
+                  onClick={() => setShowEvidence((s) => !s)}>
+            {copy.why}
+          </button>
+          {showEvidence && (
+            <ul className="agent-evidence" aria-label={copy.evidence}>
+              {agentDecision.evidence.map((item, i) => (
+                <li key={i}><strong>{item.kind}</strong>: {item.detail}</li>
+              ))}
+            </ul>
+          )}
+
+          {staticCheck && (
+            <div className={`agent-static-check ${structurallySound ? 'sound' : 'fix'}`} role="note">
+              <span className="agent-static-label">{copy.staticLabel}</span>
+              <p className="agent-static-disclosure">{copy.noExec}</p>
+              <p className="agent-static-status">{structurallySound ? copy.staticSound : copy.staticFix}</p>
+              {Array.isArray(staticCheck.checks) && staticCheck.checks.length > 0 && (
+                <ul className="agent-static-list">
+                  {staticCheck.checks.map((check, i) => <li key={i}>{check}</li>)}
+                </ul>
+              )}
+            </div>
+          )}
+
+          <div className="agent-actions">
+            {agentDecision.action_type === 'REQUEST_REASSESSMENT' ? (
+              <p className="muted small agent-reassess">{copy.reassess}</p>
+            ) : topic ? (
+              <button type="button" className="btn btn-primary"
+                      onClick={() => onOpenTopic(topic, AGENT_ACTION_TABS[agentDecision.action_type])}>
+                {copy.open} <IconArrowRight size={14} />
+              </button>
+            ) : null}
+            <button type="button" className="btn btn-ghost"
+                    onClick={() => document.getElementById('career-roadmap')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>
+              {copy.roadmap}
+            </button>
+          </div>
+
+          <p className="muted small agent-submit-note">{copy.submitNote}</p>
+        </>
+      )}
+
+      <p className="agent-unverified"><IconShield size={13} /> {copy.unverified}</p>
+    </section>
+  )
+}
+
 
 export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed, backTo }: {
   onNavigate?: (section: string, focus?: { skillId: number; roleTitle: string }) => void
-  initialFocus?: { skillId: number; roleTitle: string } | null
+  initialFocus?: { skillId: number; roleTitle: string; competency?: string } | null
   onFocusConsumed?: () => void
   backTo?: { key: string; label: string } | null
 }) {
   const { me, applyCopilot } = useApp()
   const studentId = me?.student?.id ?? 0
   const [analysis, setAnalysis] = useState<Analysis | null>(null)
-  const [studentProfile, setStudentProfile] = useState<Student | null>(me?.student ?? null)
   const [items, setItems] = useState<LearningItem[]>([])
   const [selectedSkillId, setSelectedSkillId] = useState<number | null>(null)
   const [pathsBySkill, setPathsBySkill] = useState<Record<number, PersonalizedPath | null>>({})
@@ -96,13 +322,25 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
   const [query, setQuery] = useState('')
   const [topicFilter, setTopicFilter] = useState('all')
   const [activeTab, setActiveTab] = useState<LearningTab>('for-you')
+  const [learningView, setLearningView] = useState<'today' | 'paths' | 'lesson'>('today')
   const [showTop, setShowTop] = useState(false)
+  const [showAllModules, setShowAllModules] = useState(false)
+  const [pageLoading, setPageLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
+  const [pageRetryKey, setPageRetryKey] = useState(0)
+  const [pathsLoaded, setPathsLoaded] = useState(false)
+  const [pathRetryKey, setPathRetryKey] = useState(0)
+  const [pathStatusBySkill, setPathStatusBySkill] = useState<Record<number, 'loading' | 'ready' | 'diagnostic_required' | 'error'>>({})
+  const [pathErrorsBySkill, setPathErrorsBySkill] = useState<Record<number, string>>({})
   const [activity, setActivity] = useState<ActivitySummary | null>(null)
   const [scenarioLib, setScenarioLib] = useState<ScenarioLibrary | null>(null)
+  // The stored student profile answers "My Skills": self-reported claims and
+  // officially verified skills come straight from the profile API, never from
+  // role skill gaps (which belong to the "for-you" recommendations).
+  const [studentProfile, setStudentProfile] = useState<Student | null>(null)
   // Deep link from Skills & Roles ("Learn this skill"): focus a specific skill
   // while keeping the role that prompted it in view as dismissible context.
-  const [focusInfo, setFocusInfo] = useState<{ skillId: number; roleTitle: string } | null>(null)
+  const [focusInfo, setFocusInfo] = useState<{ skillId: number; roleTitle: string; competency?: string } | null>(null)
 
   useEffect(() => {
     if (!studentId) return
@@ -115,6 +353,14 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
     if (!initialFocus) return
     setFocusInfo(initialFocus)
     setSelectedSkillId(initialFocus.skillId)
+    setLearningView('lesson')
+    if (initialFocus.competency) {
+      setLessonFocus((prev) => ({
+        skillId: initialFocus.skillId,
+        competency: initialFocus.competency as string,
+        signal: (prev?.signal ?? 0) + 1,
+      }))
+    }
     onFocusConsumed?.()
     const tryScroll = () => {
       document.getElementById('skill-detail')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -132,26 +378,37 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
     return () => { window.removeEventListener('scroll', onScroll); window.removeEventListener('load', onScroll) }
   }, [])
 
-  const load = async () => {
+  useEffect(() => {
+    if (!studentId) {
+      setPageLoading(false)
+      return
+    }
+    let alive = true
+    setPageLoading(true)
     setLoadError('')
-    const [aResult, lResult, studentResult] = await Promise.allSettled([
-      api.analysis(studentId), api.learning(studentId), api.student(studentId),
-    ])
-    if (aResult.status === 'fulfilled') setAnalysis(aResult.value)
-    else {
-      setAnalysis(null)
-      setLoadError(aResult.reason?.message || 'Learning analysis is not available yet.')
-    }
-    if (lResult.status === 'fulfilled') setItems(lResult.value)
-    else {
-      setItems([])
-      setLoadError((prev) => prev || lResult.reason?.message || 'Learning content is not available yet.')
-    }
-    if (studentResult.status === 'fulfilled') setStudentProfile(studentResult.value)
-    else setStudentProfile(me?.student ?? null)
-  }
+    void Promise.allSettled([api.analysis(studentId), api.learning(studentId)]).then(([aResult, lResult]) => {
+      if (!alive) return
+      if (aResult.status === 'fulfilled') setAnalysis(aResult.value)
+      else setAnalysis(null)
+      if (lResult.status === 'fulfilled') setItems(lResult.value)
+      else setItems([])
+      const failure = aResult.status === 'rejected' ? aResult.reason : lResult.status === 'rejected' ? lResult.reason : null
+      if (failure) {
+        setLoadError(failureMessage(failure, 'en', 'Your learning recommendations could not be loaded right now.'))
+      }
+      setPageLoading(false)
+    })
+    return () => { alive = false }
+  }, [studentId, pageRetryKey])
 
-  useEffect(() => { if (studentId) void load() }, [studentId])
+  useEffect(() => {
+    if (!studentId) return
+    let alive = true
+    api.student(studentId)
+      .then((profile) => { if (alive) setStudentProfile(profile) })
+      .catch(() => { if (alive) setStudentProfile(null) })
+    return () => { alive = false }
+  }, [studentId])
 
   useEffect(() => {
     if (!studentId) return
@@ -165,99 +422,131 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
   const itemBySkill = useMemo(() => new Map(items.map((item) => [item.skill_id, item])), [items])
   const allGaps = analysis?.skill_gaps || []
   const openGaps = allGaps.filter((gap) => gap.status !== 'strong')
-  const profileSkills = useMemo<LearningSkill[]>(() => {
-    const byId = new Map<number, LearningSkill>()
-    for (const skill of studentProfile?.self_reported_skills ?? []) {
-      byId.set(skill.skill_id, {
-        skill_id: skill.skill_id,
-        skill_name: skill.name,
-        category: skill.category,
-        required_level: 'Profile evidence',
-        student_level: skill.level || null,
-        status: 'gap',
-        verified: false,
-        profileSource: 'claimed',
-      })
-    }
-    // A verified record wins if the same skill also appears as a CV/profile claim.
-    for (const skill of studentProfile?.verified_skills ?? []) {
-      byId.set(skill.skill_id, {
-        skill_id: skill.skill_id,
-        skill_name: skill.name,
-        category: skill.category,
-        required_level: 'Profile evidence',
-        student_level: skill.level || null,
-        status: 'strong',
-        verified: true,
-        profileSource: 'verified',
-      })
-    }
-    return [...byId.values()].sort((a, b) => a.skill_name.localeCompare(b.skill_name))
-  }, [studentProfile])
-  const learningSkills = useMemo<LearningSkill[]>(() => {
-    const byId = new Map<number, LearningSkill>()
-    for (const gap of openGaps) byId.set(gap.skill_id, gap)
-    for (const skill of profileSkills) if (!byId.has(skill.skill_id)) byId.set(skill.skill_id, skill)
-    return [...byId.values()]
-  }, [openGaps, profileSkills])
-  const learningSkillKey = learningSkills.map((skill) => skill.skill_id).sort((a, b) => a - b).join(',')
+  const openGapSkillKey = openGaps.map((gap) => gap.skill_id).join(',')
   const knownPaths = Object.values(pathsBySkill).filter((path): path is PersonalizedPath => !!path)
   const doneTopics = knownPaths.reduce((sum, path) => sum + topicProgressFor(path).done, 0)
   const totalTopics = knownPaths.reduce((sum, path) => sum + topicProgressFor(path).total, 0)
 
   useEffect(() => {
     let alive = true
-    const ids = learningSkills.map((skill) => skill.skill_id)
+    const ids = openGaps.map((gap) => gap.skill_id)
     if (!studentId || !ids.length) {
       setPathsBySkill({})
+      setPathStatusBySkill({})
+      setPathErrorsBySkill({})
+      setPathsLoaded(true)
       return () => { alive = false }
     }
-    Promise.all(ids.map(async (skillId) => {
+    setPathsLoaded(false)
+    setPathErrorsBySkill({})
+    setPathStatusBySkill(Object.fromEntries(ids.map((skillId) => [skillId, 'loading' as const])))
+    void Promise.all(ids.map(async (skillId) => {
       try {
         const res = await api.personalizedPath(studentId, skillId)
-        return [skillId, 'diagnostic_required' in res ? null : res] as const
-      } catch {
-        return [skillId, null] as const
+        if ('diagnostic_required' in res) {
+          return { skillId, path: null, status: 'diagnostic_required' as const, error: '' }
+        }
+        return { skillId, path: res, status: 'ready' as const, error: '' }
+      } catch (e: unknown) {
+        return {
+          skillId,
+          path: null,
+          status: 'error' as const,
+          error: failureMessage(e, 'en', 'This personalized path could not be loaded right now.'),
+        }
       }
     })).then((entries) => {
       if (!alive) return
-      setPathsBySkill(Object.fromEntries(entries))
+      setPathsBySkill((prev) => {
+        const next = { ...prev }
+        for (const entry of entries) {
+          if (entry.status !== 'error') next[entry.skillId] = entry.path
+        }
+        return next
+      })
+      setPathStatusBySkill(Object.fromEntries(entries.map((entry) => [entry.skillId, entry.status])))
+      setPathErrorsBySkill(Object.fromEntries(entries.filter((entry) => entry.error).map((entry) => [entry.skillId, entry.error])))
+      setPathsLoaded(true)
     })
     return () => { alive = false }
-  }, [studentId, learningSkillKey])
+  }, [studentId, openGapSkillKey, pathRetryKey, pageRetryKey])
 
-  const continueSkills = learningSkills.filter((skill) => {
-    const path = pathsBySkill[skill.skill_id]
+  // "My Skills" answers from the stored student profile: every self-reported
+  // claim (profileSource 'claim') plus every officially verified skill
+  // ('verified'). A skill that is both merges to the verified entry. These are
+  // profile skills, NOT role skill gaps — the gaps stay in "for-you".
+  const profileSkills = useMemo<SkillGap[]>(() => {
+    const byId = new Map<number, SkillGap>()
+    for (const s of studentProfile?.self_reported_skills ?? []) {
+      byId.set(s.skill_id, {
+        skill_id: s.skill_id,
+        skill_name: s.name,
+        category: s.category,
+        required_level: s.level,
+        student_level: s.level,
+        status: 'gap',
+        verified: false,
+        profileSource: 'claim',
+      })
+    }
+    for (const v of studentProfile?.verified_skills ?? []) {
+      byId.set(v.skill_id, {
+        skill_id: v.skill_id,
+        skill_name: v.name,
+        category: v.category,
+        required_level: v.level,
+        student_level: v.level,
+        status: 'strong',
+        verified: true,
+        profileSource: 'verified',
+      })
+    }
+    return [...byId.values()]
+  }, [studentProfile])
+
+  const continueSkills = openGaps.filter((gap) => {
+    const path = pathsBySkill[gap.skill_id]
     const progress = topicProgressFor(path)
-    return !!path && progress.hasTopics && !progress.complete
+    return pathStatusBySkill[gap.skill_id] !== 'error' && !!path && progress.hasTopics && !progress.complete
   })
-  const completedLearningSkills = learningSkills.filter((skill) => {
-    const path = pathsBySkill[skill.skill_id]
+  const completedLearningSkills = allGaps.filter((gap) => {
+    const progress = topicProgressFor(pathsBySkill[gap.skill_id])
+    return gap.status === 'strong' || (!!pathsBySkill[gap.skill_id] && progress.complete)
+  })
+  const completedLearningCount = openGaps.filter((gap) => {
+    const path = pathsBySkill[gap.skill_id]
     const progress = topicProgressFor(path)
     return !!path && progress.hasTopics && progress.complete
-  })
-  const completedLearningCount = completedLearningSkills.length
-  const inProgressCount = learningSkills.filter((skill) => {
-    const path = pathsBySkill[skill.skill_id]
+  }).length
+  const inProgressCount = openGaps.filter((gap) => {
+    const path = pathsBySkill[gap.skill_id]
     const progress = topicProgressFor(path)
     return !!path && progress.hasTopics && progress.done > 0 && !progress.complete
   }).length
-  const completedCount = completedLearningCount
+  const completedCount = allGaps.filter((gap) => gap.status === 'strong').length + completedLearningCount
   const notStartedCount = openGaps.length - inProgressCount - completedLearningCount
 
   const tabCounts: Record<LearningTab, number> = {
     'for-you': openGaps.length,
-    'my-skills': profileSkills.length,
+    'my-skills': studentProfile ? profileSkills.length : allGaps.length,
     continue: continueSkills.length,
     completed: completedCount,
   }
 
-  const skillsForTab = useMemo<LearningSkill[]>(() => {
+  const skillsForTab = useMemo(() => {
     if (activeTab === 'my-skills') return profileSkills
     if (activeTab === 'continue') return continueSkills
     if (activeTab === 'completed') return completedLearningSkills
     return openGaps
   }, [activeTab, profileSkills, continueSkills, completedLearningSkills, openGaps])
+
+  const tabCopy: Record<LearningTab, string> = {
+    'for-you': 'Recommended for you',
+    'my-skills': 'Skill map',
+    continue: 'In-progress paths',
+    completed: 'Completed skills',
+  }
+  const currentTabCopy = tabCopy[activeTab]
 
   const filteredSkills = skillsForTab.filter((gap) => {
     const q = query.trim().toLowerCase()
@@ -270,26 +559,20 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
     )
   })
 
-  const allVisibleSkills = useMemo(() => {
-    const byId = new Map<number, LearningSkill>()
-    for (const gap of allGaps) byId.set(gap.skill_id, gap)
-    for (const skill of profileSkills) if (!byId.has(skill.skill_id)) byId.set(skill.skill_id, skill)
-    return [...byId.values()]
-  }, [allGaps, profileSkills])
-
   useEffect(() => {
     // A deep link from Skills & Roles wins over the automatic first-gap select.
     if (focusInfo) return
-    const preferred = openGaps[0] || profileSkills[0] || allGaps[0]
+    const preferred = skillsForTab[0] || openGaps[0] || allGaps[0]
     if (!preferred) return
-    if (!selectedSkillId || !allVisibleSkills.some((gap) => gap.skill_id === selectedSkillId)) {
+    if (!selectedSkillId || !skillsForTab.some((gap) => gap.skill_id === selectedSkillId)) {
       setSelectedSkillId(preferred.skill_id)
     }
-  }, [analysis?.role_id, allVisibleSkills, allGaps.length, openGaps.length, profileSkills, selectedSkillId, focusInfo])
+  }, [analysis?.role_id, skillsForTab, selectedSkillId, focusInfo])
 
   const selectedGap = skillsForTab.find((gap) => gap.skill_id === selectedSkillId)
-    || allVisibleSkills.find((gap) => gap.skill_id === selectedSkillId)
-    || filteredSkills[0] || openGaps[0] || profileSkills[0] || allGaps[0]
+    || filteredSkills[0]
+    || openGaps[0]
+    || allGaps[0]
 
   // Phase 5: for the currently focused skill, surface the role-specific
   // practice scenarios written for it (matched by skill name on the cards).
@@ -315,6 +598,7 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
 
   const startLearning = (skillId: number) => {
     setSelectedSkillId(skillId)
+    setLearningView('lesson')
     setLearningStart((prev) => ({ skillId, signal: (prev?.signal ?? 0) + 1 }))
     requestAnimationFrame(() => {
       document.getElementById('skill-detail')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -345,7 +629,12 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
     pct: openGaps.length ? Math.round((verifiedRequiredSet.size / openGaps.length) * 100) : 0,
   }
 
-  const matchPct = allGaps.length ? Math.round((allGaps.filter((g) => g.status === 'strong').length / allGaps.length) * 100) : null
+  // Data truth (Phase 2): read the backend's canonical target requirement
+  // coverage. Never recompute a "match" from strong/total here — that ignored
+  // partial credit and could disagree with the Dashboard ring for the same role.
+  const matchPct = analysis?.metrics?.target_requirement_coverage != null
+    ? Math.round(analysis.metrics.target_requirement_coverage)
+    : (analysis?.match_score != null ? Math.round(analysis.match_score) : null)
   const requiredSkillCount = allGaps.length
   const plannedMinutes = knownPaths.reduce((sum, path) => sum + sumPathMinutes(path), 0)
 
@@ -364,25 +653,31 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
     const doneSet = new Set(path?.progress ?? [])
     const items = path?.items ?? []
     const nextCompetency = items.find((it) => !doneSet.has(it.id))?.competency ?? items[0]?.competency ?? null
+    const pathStatus = pathStatusBySkill[gap.skill_id]
     return {
       gap,
       path,
       progress,
       nextCompetency,
       minutes: sumPathMinutes(path),
-      status: !path ? 'diagnostic' as const : progress.complete ? 'done' as const : progress.done > 0 ? 'in-progress' as const : 'not-started' as const,
+      status: pathStatus === 'error' ? 'error' as const
+        : pathStatus === 'diagnostic_required' ? 'diagnostic' as const
+          : !path ? 'unavailable' as const
+            : progress.complete ? 'done' as const
+              : progress.done > 0 ? 'in-progress' as const : 'not-started' as const,
     }
   })
-  const currentSkillId = stepperRows.find((r) => r.status !== 'done')?.gap.skill_id ?? null
+  const currentSkillId = stepperRows.find((r) => r.status !== 'done' && r.status !== 'error')?.gap.skill_id ?? null
 
   const topicCategories = [...new Set(skillsForTab.map((g) => g.category).filter(Boolean))]
   const visibleStepperRows = topicFilter === 'all' ? stepperRows : stepperRows.filter((r) => r.gap.category === topicFilter)
-  const shownStepperRows = visibleStepperRows.slice(0, 8)
-  const moreModulesCount = visibleStepperRows.length - shownStepperRows.length
+  const shownStepperRows = showAllModules ? visibleStepperRows : visibleStepperRows.slice(0, 8)
+  const moreModulesCount = visibleStepperRows.length - (showAllModules ? visibleStepperRows.length : Math.min(8, visibleStepperRows.length))
 
   const openLessonTopic = (skillId: number, competency: string, tab?: 'learn' | 'example' | 'practice' | 'discuss' | 'mini_check') => {
     if (!competency) return
     setSelectedSkillId(skillId)
+    setLearningView('lesson')
     setLessonFocus((prev) => ({ skillId, competency, signal: (prev?.signal ?? 0) + 1, tab }))
     requestAnimationFrame(() => {
       document.getElementById('skill-detail')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -399,18 +694,12 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
     onNavigate?.('scenarios', { skillId: selectedGap?.skill_id ?? 0, roleTitle: analysis?.role_title || me?.student?.target_role?.title || '' })
   }
   const goAssessments = () => onNavigate?.('assessments')
+  const retryPaths = () => setPathRetryKey((key) => key + 1)
   const viewAllModules = () => {
-    selectLearningTab('for-you')
-    document.getElementById('learning-home')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-  }
-  const selectLearningTab = (tab: LearningTab) => {
-    setActiveTab(tab)
-    setTopicFilter('all')
-    const nextSkills = tab === 'my-skills' ? profileSkills
-      : tab === 'continue' ? continueSkills
-        : tab === 'completed' ? completedLearningSkills
-          : openGaps
-    if (nextSkills[0]) setSelectedSkillId(nextSkills[0].skill_id)
+    setActiveTab('for-you')
+    setShowAllModules(false)
+    setLearningView('paths')
+    requestAnimationFrame(() => document.querySelector('.learning-page .focus-flow')?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
   }
 
   if (!studentId) return <div className="empty">Log in as a student to view your learning path.</div>
@@ -420,36 +709,29 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
     analysis?.company ||
     me?.student?.target_role?.company_name ||
     (targetTitle ? 'Current target from your profile' : 'Choose one from Skills & Roles')
-  const tabCopy: Record<LearningTab, { title: string; subtitle: string; emptyTitle: string; emptyBody: string }> = {
-    'for-you': {
-      title: 'Your skill gaps',
-      subtitle: 'Target-role recommendations and gaps. Start a diagnostic to build a personalized path.',
-      emptyTitle: 'No target-role gaps',
-      emptyBody: 'Select a target role on Skills & Roles to see learning recommendations.',
-    },
-    'my-skills': {
-      title: 'My profile skills',
-      subtitle: 'Skills stored on your profile. Profile claims are not verified; only Final Assessment creates an officially verified skill.',
-      emptyTitle: 'No profile skills yet',
-      emptyBody: 'No skills are stored on this profile. Add them through your existing profile or CV flow.',
-    },
-    continue: {
-      title: 'Continue learning',
-      subtitle: 'Learning paths with unfinished persisted topics.',
-      emptyTitle: 'No learning path in progress',
-      emptyBody: 'Start a diagnostic from For You or My Skills to create a learning path.',
-    },
-    completed: {
-      title: 'Completed learning',
-      subtitle: 'Learning paths completed through their Mini Checks. Completion is separate from official skill verification.',
-      emptyTitle: 'No completed learning paths',
-      emptyBody: 'Complete every topic Mini Check in a path to see it here.',
-    },
-  }
-  const currentTabCopy = tabCopy[activeTab]
+
+  const journeyGap = continueSkills[0] ?? null
+  const journeyPath = journeyGap ? (pathsBySkill[journeyGap.skill_id] ?? null) : null
+  const journeyDoneIds = new Set(journeyPath?.progress ?? [])
+  const journeyTopic = journeyPath?.items.find((it) => !journeyDoneIds.has(it.id)) ?? journeyPath?.items[0] ?? null
+  const journeyPlanlessGap = openGaps.find((g) => pathStatusBySkill[g.skill_id] === 'diagnostic_required') ?? null
+  const journeyPathErrorGap = openGaps.find((g) => pathStatusBySkill[g.skill_id] === 'error') ?? null
+  const journeyOpenPaths = openGaps.filter((g) => !!pathsBySkill[g.skill_id])
+  const pageContentReady = !pageLoading && !loadError
 
   return (
     <div className="learning-page">
+      <MiniTourBanner
+        page="learning"
+        compact
+        eyebrow="Learning · First time here?"
+        title="Your plan at a glance"
+        points={[
+          'A diagnostic reveals your skill gaps, then builds a step-by-step plan.',
+          'Milestones show exactly where you are — to-do, in progress, needs review, done.',
+          'Follow the highlighted topic next and tick off the current step.',
+        ]}
+      />
       {backTo && (
         <nav className="crumbs" aria-label="Breadcrumbs">
           <button type="button" className="crumb-back" onClick={() => onNavigate?.(backTo.key)}>
@@ -461,7 +743,8 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
         <div className="lrn-focus" role="status">
           <IconTarget size={15} />
           <span>
-            <b>{focusedName}</b> · learning toward your <b>{focusInfo.roleTitle || 'target'}</b> role. It is open in the panel below.
+            <b>{focusedName}</b> · learning toward your <b>{focusInfo.roleTitle || 'target'}</b> role.
+            {focusInfo.competency ? ` We'll open ${humanizeTopicLabel(focusInfo.competency)} if it appears in your generated path.` : ' It is open in the panel below.'}
           </span>
           <button type="button" className="lrn-focus-x" aria-label="Dismiss context" onClick={() => setFocusInfo(null)}>✕</button>
         </div>
@@ -494,17 +777,25 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
         <div className="learning-hero-copy">
           <p className="learning-hero-eyebrow">Learning</p>
           <h1>Build the skills your target role expects.</h1>
-          <p>
-            Start with a topic diagnostic, follow the personalized path, and complete each topic
-            through its Mini Check. The AI Tutor is there when you need a different angle.
-          </p>
+          <p>Follow one personalized path from skill gap to practice and verified progress. Your AI Tutor is available whenever you need help.</p>
         </div>
-        <div className="hero-target-card">
+        <div className="hero-target-card hcard-opportunity">
           <div className="hero-target-card-head"><IconRoadmap size={15} /> Target role</div>
           <div className="hero-target-role">{targetTitle || 'No target selected'}</div>
           {matchPct !== null && (
             <>
-              <p className="hero-progress-label">Current skill match <strong>{matchPct}%</strong></p>
+              <p className="hero-progress-label" title="Level-aware coverage of your target role's required skills (backend-computed).">
+                Current requirement coverage <strong>{matchPct}%</strong>{' '}
+                <WhyThis>
+                  Numerator: sum of per-required-skill credit (0–1 each — full at/above the required level,
+                  partial below it, reduced for adjacent-name evidence, 0 with no evidence). Denominator: the
+                  number of required skills the target role lists. Source: GET /api/students/&lt;id&gt;/analysis
+                  {' '}→ metrics.target_requirement_coverage (backend-computed). Rounding: 1 decimal in the
+                  backend, shown here as a whole percent. Included: verified and self-reported evidence.
+                  Excluded: skills that are not requirements of this role. Required skills with no evidence
+                  stay in the denominator at 0. Not course progress and not a hiring guarantee.
+                </WhyThis>
+              </p>
               <div className="progress-track"><div className="progress-fill" style={{ width: `${matchPct}%` }} /></div>
             </>
           )}
@@ -513,16 +804,152 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
             <span className="htc-chip"><IconCheck size={12} /> {verifiedRequired.verified} verified</span>
           </div>
         </div>
-        <SearchBar
+        {learningView === 'paths' && <SearchBar
           value={query}
           onChange={setQuery}
           placeholder="Search a skill, topic, or ask AI Tutor..."
-        />
-        <LearningTabs active={activeTab} counts={tabCounts} onChange={selectLearningTab} />
+        />}
+        {learningView === 'paths' && <LearningTabs active={activeTab} counts={tabCounts} onChange={setActiveTab} />}
       </section>
 
-      <section className="lp-stat-grid" aria-label="Learning stats">
-        <article className="lp-stat-card">
+      <nav className="focus-flow" aria-label="Learning sections">
+        <button type="button" className={learningView === 'today' ? 'active' : ''} aria-current={learningView === 'today' ? 'step' : undefined} onClick={() => setLearningView('today')}><span>01</span> Today</button>
+        <button type="button" className={learningView === 'paths' ? 'active' : ''} aria-current={learningView === 'paths' ? 'step' : undefined} onClick={() => setLearningView('paths')}><span>02</span> My paths</button>
+        <button type="button" className={learningView === 'lesson' ? 'active' : ''} aria-current={learningView === 'lesson' ? 'step' : undefined} onClick={() => setLearningView('lesson')} disabled={!selectedGap}><span>03</span> Lesson</button>
+      </nav>
+
+      {pageLoading && (
+        <section className="learning-page-state" role="status" aria-label="Loading learning plan">
+          <span className="learning-state-spinner" aria-hidden="true" />
+          <div><strong>Loading your learning plan…</strong><p>We’re checking your target, recommendations, and saved paths.</p></div>
+        </section>
+      )}
+      {!pageLoading && loadError && (
+        <section className="learning-page-state learning-page-error" role="alert">
+          <div><strong>We couldn’t load your learning plan.</strong><p>{loadError}</p></div>
+          <button type="button" className="btn btn-primary" onClick={() => setPageRetryKey((key) => key + 1)}>Retry learning plan</button>
+        </section>
+      )}
+      {pageContentReady && learningView === 'today' && <>
+      <section className="journey-band" aria-label="Continue your plan">
+        {!pathsLoaded ? (
+          <div className="journey-band-inner journey-path-loading" role="status">
+            <span className="learning-state-spinner" aria-hidden="true" />
+            <div><strong>Loading your personalized paths…</strong><p>We’re matching your open skill gaps to the right topics.</p></div>
+          </div>
+        ) : pathsLoaded && journeyGap && journeyTopic ? (
+          <div className="journey-band-inner">
+            <p className="journey-eyebrow">Continue your plan</p>
+            <CurrentLessonCard
+              skillName={journeyGap.skill_name}
+              topicTitle={humanizeTopicLabel(journeyTopic.title)}
+              estimatedMinutes={journeyTopic.estimated_minutes}
+              completedTopics={journeyPath ? topicProgressFor(journeyPath).done : 0}
+              totalTopics={journeyPath ? topicProgressFor(journeyPath).total : 0}
+              purpose={`Added because your diagnostic score was ${Math.round(journeyTopic.diagnostic_score)}%.`}
+              onContinue={() => openLessonTopic(journeyGap.skill_id, journeyTopic.competency)}
+            />
+            {continueSkills.length > 1 && (
+              <p className="muted small journey-more">
+                {continueSkills.length - 1} other plan{continueSkills.length - 1 === 1 ? '' : 's'} still in progress — see In-progress paths below.
+              </p>
+            )}
+          </div>
+        ) : journeyPlanlessGap ? (
+          <div className="journey-band-inner journey-empty">
+            <p className="journey-eyebrow">Continue your plan</p>
+            <div className="journey-card">
+              <div className="journey-card-icon"><IconAssessment size={18} /></div>
+              <div className="journey-card-copy">
+                <span className="cc-kicker">{journeyPlanlessGap.skill_name}</span>
+                <h3>No plan yet</h3>
+                <p className="muted small">
+                  Take a diagnostic for {journeyPlanlessGap.skill_name} to unlock a personalized path built from your weakest topics.
+                </p>
+              </div>
+              <div className="journey-card-actions">
+                <button className="btn btn-primary" onClick={() => startLearning(journeyPlanlessGap.skill_id)}>
+                  <IconAssessment size={14} /> Start a diagnostic
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : journeyPathErrorGap ? (
+          <div className="journey-band-inner journey-empty" role="alert">
+            <p className="journey-eyebrow">Continue your plan</p>
+            <div className="journey-card">
+              <div className="journey-card-icon"><IconAlert size={18} /></div>
+              <div className="journey-card-copy">
+                <span className="cc-kicker">{journeyPathErrorGap.skill_name}</span>
+                <h3>This path didn’t load</h3>
+                <p className="muted small">{pathErrorsBySkill[journeyPathErrorGap.skill_id] || 'We couldn’t load this personalized path. Your saved progress is still safe.'}</p>
+              </div>
+              <div className="journey-card-actions">
+                <button className="btn btn-primary" onClick={retryPaths}><IconRefresh size={14} /> Retry path</button>
+              </div>
+            </div>
+          </div>
+        ) : journeyOpenPaths.length > 0 ? (
+          <div className="journey-band-inner journey-empty">
+            <p className="journey-eyebrow">Continue your plan</p>
+            <div className="journey-card">
+              <div className="journey-card-icon"><IconBolt size={18} /></div>
+              <div className="journey-card-copy">
+                <h3>Your learning plans are ready</h3>
+                <p className="muted small">
+                  Every target skill has a path. Start the first topic of any plan to begin making progress.
+                </p>
+              </div>
+              <div className="journey-card-actions">
+                <button className="btn btn-primary" onClick={() => startLearning(openGaps[0].skill_id)}>
+                  <IconBook size={14} /> Start your first topic
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : analysis && !targetTitle ? (
+          <div className="journey-band-inner journey-empty">
+            <p className="journey-eyebrow">Continue your plan</p>
+            <div className="journey-card">
+              <div className="journey-card-icon"><IconTarget size={18} /></div>
+              <div className="journey-card-copy">
+                <h3>Pick a target role</h3>
+                <p className="muted small">
+                  Choose a role on Skills &amp; Roles and your skill gaps and personalized learning paths appear here.
+                </p>
+              </div>
+              <div className="journey-card-actions">
+                <button className="btn btn-primary" onClick={() => onNavigate?.('skills')}>
+                  <IconTarget size={14} /> Choose a target role
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : analysis && targetTitle ? (
+          <div className="journey-band-inner journey-empty">
+            <p className="journey-eyebrow">Continue your plan</p>
+            <div className="journey-card">
+              <div className="journey-card-icon"><IconCheck size={18} /></div>
+              <div className="journey-card-copy">
+                <h3>You're up to date</h3>
+                <p className="muted small">
+                  No open gaps right now. Keep exploring modules or verify a skill with an assessment.
+                </p>
+              </div>
+              <div className="journey-card-actions">
+                <button className="btn btn-primary" onClick={viewAllModules}>
+                  <IconBook size={14} /> View all learning modules
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+      </section>
+
+      <details className="learning-snapshot">
+        <summary>Learning snapshot <span>Progress, time, streak, and verified skills</span></summary>
+        <section className="lp-stat-grid" aria-label="Learning stats">
+        <article className="lp-stat-card hcard-progress">
           <div className="lp-stat-top">
             <span className="lp-stat-icon blue"><IconAssessment size={18} /></span>
             <div>
@@ -540,7 +967,7 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
           )}
         </article>
 
-        <article className="lp-stat-card">
+        <article className="lp-stat-card hcard-progress">
           <div className="lp-stat-top">
             <span className="lp-stat-icon teal"><IconClock size={18} /></span>
             <div>
@@ -552,7 +979,7 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
           <p className="lp-stat-sub">planned across your learning path · vs a 7h goal</p>
         </article>
 
-        <article className="lp-stat-card">
+        <article className="lp-stat-card hcard-progress">
           <div className="lp-stat-top">
             <span className="lp-stat-icon brand"><IconBolt size={18} /></span>
             <div>
@@ -564,7 +991,7 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
           <p className="lp-stat-sub">{activity && activity.active_days > 0 ? `${activity.active_days} active days · 30-day goal` : 'from your activity · 30-day goal'}</p>
         </article>
 
-        <article className="lp-stat-card">
+        <article className="lp-stat-card hcard-progress">
           <div className="lp-stat-top">
             <span className="lp-stat-icon green"><IconCheck size={18} /></span>
             <div>
@@ -573,19 +1000,37 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
             </div>
           </div>
           <div className="progress-track on-light"><div className="progress-fill" style={{ width: `${verifiedRequired.total > 0 ? verifiedRequired.pct : 0}%`, background: 'var(--sb-green)' }} /></div>
-          <p className="lp-stat-sub">{verifiedRequired.total > 0 ? `${verifiedRequired.verified} of ${verifiedRequired.total} target skills verified` : 'verified via assessments'}</p>
+          <p className="lp-stat-sub">
+            {verifiedRequired.total > 0
+              ? `${verifiedRequired.verified} of ${verifiedRequired.total} still-open requirements have verified evidence`
+              : 'verified only via passed assessments'}
+            {' '}<WhyThis>
+              Numerator: required skills that are not yet strong but have a passed-assessment record.
+              Denominator: required skills that are not yet strong (gap or missing). Source: your profile's
+              verified_skills matched against the target role's requirements. Rounding: nearest whole percent.
+              Included: passed Final Assessments only. Excluded: self-reported, CV-detected, practiced and
+              topic-completed skills — none of these count as verified. This is not a role-readiness claim.
+            </WhyThis>
+          </p>
         </article>
-      </section>
+        </section>
+      </details>
 
+      <button type="button" className="focus-secondary-link" onClick={viewAllModules}>Explore all my paths <IconArrowRight size={14} /></button>
+      </>}
+
+      {pageContentReady && learningView === 'paths' && <>
       <div className="learning-layout">
-        <main className="panel path-panel">
+        <main className="panel path-panel hcard-info">
           <div className="panel-head">
             <div>
               <div className="panel-title-row">
                 <span className="panel-title-icon"><IconTarget size={15} /></span>
-              <h3 className="panel-title">{currentTabCopy.title}</h3>
+                <h3 className="panel-title">{currentTabCopy}</h3>
               </div>
-              <p className="panel-subtitle">{currentTabCopy.subtitle}</p>
+              <p className="panel-subtitle">{activeTab === 'my-skills'
+                ? 'Every skill on your profile — self-reported claims and officially verified ones. Pick one to study it toward your target role.'
+                : 'One row per skill. Start a diagnostic on a gap to build its personalized path, then complete every Mini Check to finish it.'}</p>
             </div>
             <select className="lp-filter" value={topicFilter} onChange={(e) => setTopicFilter(e.target.value)} aria-label="Filter path by topic category">
               <option value="all">All topics</option>
@@ -593,8 +1038,14 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
             </select>
           </div>
 
-          {visibleStepperRows.length === 0 ? (
-            <EmptyLearningState title={currentTabCopy.emptyTitle} body={currentTabCopy.emptyBody} />
+          {!pathsLoaded && (
+            <div className="path-load-state" role="status">
+              <span className="learning-state-spinner" aria-hidden="true" />
+              <div><strong>Loading your learning paths…</strong><p>Your modules and saved progress will appear here.</p></div>
+            </div>
+          )}
+          {pathsLoaded && visibleStepperRows.length === 0 ? (
+            <EmptyLearningState title="No skill gaps yet" body="Select a target role on Skills & Roles to see your gaps and their personalized paths." />
           ) : (
             <>
               <ol className="path-list">
@@ -603,7 +1054,7 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
                   return (
                     <li
                       key={row.gap.skill_id}
-                      className={`path-item ${row.status === 'done' ? 'is-done' : ''}`}
+                      className={`path-item ${row.status === 'done' ? 'is-done' : ''} ${row.status === 'error' ? 'is-error' : ''}`}
                       data-current={row.gap.skill_id === currentSkillId}
                     >
                       <span className="path-marker">{row.status === 'done' ? <IconCheck size={13} /> : n}</span>
@@ -623,9 +1074,14 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
                         </div>
                         {row.status === 'done' ? (
                           <span className="status-pill passed">Completed</span>
-                        ) : row.status === 'diagnostic' ? (
+                        ) : row.status === 'error' ? (
+                          <div className="path-row-action">
+                            <span className="path-row-error" role="alert">{pathErrorsBySkill[row.gap.skill_id] || 'This path could not be loaded.'}</span>
+                            <button className="btn" onClick={retryPaths}><IconRefresh size={14} /> Retry</button>
+                          </div>
+                        ) : row.status === 'diagnostic' || row.status === 'unavailable' ? (
                           <button className="btn btn-primary" onClick={() => startLearning(row.gap.skill_id)}>
-                            Start <IconArrowRight size={14} />
+                            {row.status === 'diagnostic' ? 'Start diagnostic' : 'Start'} <IconArrowRight size={14} />
                           </button>
                         ) : (
                           <button className="btn" onClick={() => openLessonTopic(row.gap.skill_id, row.nextCompetency ?? '')}>
@@ -638,8 +1094,13 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
                 })}
               </ol>
               {moreModulesCount > 0 && (
-                <button className="btn btn-ghost view-all-modules" onClick={viewAllModules} aria-label={`View all ${moreModulesCount} more modules`}>
+                <button className="btn btn-ghost view-all-modules" onClick={() => setShowAllModules(true)} aria-expanded="false" aria-label={`Show ${moreModulesCount} more modules`}>
                   +{moreModulesCount} more module{moreModulesCount === 1 ? '' : 's'} <IconArrowRight size={14} />
+                </button>
+              )}
+              {showAllModules && visibleStepperRows.length > 8 && (
+                <button className="btn btn-ghost view-all-modules" onClick={() => setShowAllModules(false)} aria-expanded="true">
+                  Show fewer modules
                 </button>
               )}
             </>
@@ -672,8 +1133,10 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
           )}
         </main>
 
+        <details className="focus-library focus-more-learning">
+          <summary>More ways to learn <span>AI Tutor · practice · assessments</span></summary>
         <aside className="right-col">
-          <div className="panel lp-tutor-panel">
+          <div className="panel lp-tutor-panel hcard-ai">
             <div className="lp-tutor-avatar"><IconChat size={22} /></div>
             <h3 className="panel-title">AI Tutor</h3>
             <p>Chat with our assistant about any topic on your path — it knows your background, current skills, and target role.</p>
@@ -721,9 +1184,10 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
             </button>
           </div>
         </aside>
+        </details>
       </div>
 
-      {continueSkills.length > 0 && activeTab !== 'continue' && (
+      {continueSkills.length > 0 && (
         <section className="learning-section">
           <SectionTitle eyebrow="Continue Learning" title="Pick up where you left off" meta={`${continueSkills.length} active path${continueSkills.length === 1 ? '' : 's'}`} />
           <div className="continue-grid">
@@ -739,11 +1203,13 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
         </section>
       )}
 
-      <div className="learning-home-grid" id="learning-home">
+      <details className="focus-library" id="learning-home">
+        <summary>Browse the full skill library <span>{filteredSkills.length} skills</span></summary>
+      <div className="learning-home-grid">
         <section className="learning-section">
           <SectionTitle
-            eyebrow={activeTab === 'my-skills' ? 'Profile skills' : activeTab === 'completed' ? 'Learning history' : activeTab === 'continue' ? 'Active paths' : 'Recommended skills'}
-            title={currentTabCopy.title}
+            eyebrow="Recommended Skills"
+            title={currentTabCopy}
             meta={`${filteredSkills.length} shown`}
           />
           {loadError && <div className="error learning-error">{loadError}</div>}
@@ -752,18 +1218,18 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
               <SkillCard
                 key={gap.skill_id}
                 gap={gap}
+                profileSource={gap.profileSource}
                 path={pathsBySkill[gap.skill_id]}
                 selected={selectedGap?.skill_id === gap.skill_id}
-                profileSource={gap.profileSource}
-                onSelect={() => setSelectedSkillId(gap.skill_id)}
+                onSelect={() => { setSelectedSkillId(gap.skill_id); setLearningView('lesson') }}
                 onStart={() => startLearning(gap.skill_id)}
               />
             ))}
           </div>
           {filteredSkills.length === 0 && (
             <EmptyLearningState
-              title={query ? 'No skills match that search' : currentTabCopy.emptyTitle}
-              body={query ? 'Try another skill, category, or topic.' : currentTabCopy.emptyBody}
+              title={query ? 'No skills match that search' : 'No learning items here yet'}
+              body={query ? 'Try another skill, category, or topic.' : 'Select a target role on Skills & Roles to unlock dynamic learning recommendations.'}
             />
           )}
         </section>
@@ -777,27 +1243,37 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
           />
         </aside>
       </div>
+      </details>
+      <details className="focus-library">
+        <summary>Resources and career roadmap <span>Optional reference</span></summary>
+        <ResourceCenter items={items} />
+        <CareerRoadmapCard studentId={studentId} roleTitle={analysis?.role_title} />
+      </details>
+      </>}
 
-      {selectedGap && (
-        <SkillDetailPanel
-          studentId={studentId}
-          gap={selectedGap}
-          item={itemBySkill.get(selectedGap.skill_id)}
-          path={pathsBySkill[selectedGap.skill_id]}
-          roleTitle={analysis?.role_title}
-          startSignal={learningStart?.skillId === selectedGap.skill_id ? learningStart.signal : 0}
-          focusSignal={lessonFocus?.skillId === selectedGap.skill_id ? lessonFocus : null}
-          onPathChange={(path) => setPathsBySkill((prev) => ({ ...prev, [selectedGap.skill_id]: path }))}
-          onToggleStep={(n) => {
-            const item = itemBySkill.get(selectedGap.skill_id)
-            if (item) void toggleStep(item, n)
-          }}
-          onCompetencyChange={setCopilotCompetency}
-        />
+      {pageContentReady && learningView === 'lesson' && selectedGap && (
+        <div className="focus-lesson-shell">
+          <button type="button" className="focus-back" onClick={() => setLearningView('paths')}><IconBack size={14} /> Back to my paths</button>
+          <SkillDetailPanel
+            key={selectedGap.skill_id}
+            studentId={studentId}
+            gap={selectedGap}
+            item={itemBySkill.get(selectedGap.skill_id)}
+            path={pathsBySkill[selectedGap.skill_id]}
+            roleTitle={analysis?.role_title}
+            startSignal={learningStart?.skillId === selectedGap.skill_id ? learningStart.signal : 0}
+            focusSignal={lessonFocus?.skillId === selectedGap.skill_id ? lessonFocus : null}
+            initialPath={pathsBySkill[selectedGap.skill_id]}
+            onPathChange={(path) => setPathsBySkill((prev) => ({ ...prev, [selectedGap.skill_id]: path }))}
+            onToggleStep={(n) => {
+              const item = itemBySkill.get(selectedGap.skill_id)
+              if (item) void toggleStep(item, n)
+            }}
+            onCompetencyChange={setCopilotCompetency}
+            onOpenTopic={(competency, tab) => openLessonTopic(selectedGap.skill_id, competency, tab)}
+          />
+        </div>
       )}
-
-      <ResourceCenter items={items} />
-      <CareerRoadmapCard studentId={studentId} roleTitle={analysis?.role_title} />
 
       {showTop && (
         <button className="btn back-top" onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })} aria-label="Back to top">
@@ -808,17 +1284,19 @@ export default function LearningPage({ onNavigate, initialFocus, onFocusConsumed
   )
 }
 
-function SkillDetailPanel({ studentId, gap, item, path, roleTitle, startSignal, focusSignal, onPathChange, onToggleStep, onCompetencyChange }: {
+function SkillDetailPanel({ studentId, gap, item, path, roleTitle, startSignal, focusSignal, initialPath, onPathChange, onToggleStep, onCompetencyChange, onOpenTopic }: {
   studentId: number
-  gap: LearningSkill
+  gap: SkillGap
   item?: LearningItem
   path?: PersonalizedPath | null
   roleTitle?: string
   startSignal?: number
   focusSignal?: { skillId?: number; competency: string; signal: number; tab?: 'learn' | 'example' | 'practice' | 'discuss' | 'mini_check' } | null
+  initialPath?: PersonalizedPath | null
   onPathChange?: (path: PersonalizedPath | null) => void
   onToggleStep: (step: number) => void
   onCompetencyChange: (competency: string | null) => void
+  onOpenTopic: (competency: string, tab?: LessonTab) => void
 }) {
   const [diagRefreshKey, setDiagRefreshKey] = useState(0)
   return (
@@ -827,29 +1305,29 @@ function SkillDetailPanel({ studentId, gap, item, path, roleTitle, startSignal, 
         gap={gap}
         item={item}
         roleTitle={roleTitle}
-        topicProgress={topicProgressFor(path, gap.profileSource === 'verified' || gap.status === 'strong' ? 100 : 0)}
-        profileSource={gap.profileSource}
+        topicProgress={topicProgressFor(path, gap.status === 'strong' ? 100 : 0)}
       />
 
-      {/* A path-start signal belongs to the path panel.  Passing it to the
-          diagnostic panel races a valid path lookup and creates an abandoned
-          newer diagnostic that masks the path. */}
-      <DiagnosticPanel studentId={studentId} skillId={gap.skill_id} skillName={gap.skill_name} startSignal={0} hasUsablePath={!!path && !path.stale} onComplete={() => setDiagRefreshKey(k => k + 1)} />
+      <LearningAgentPanel studentId={studentId} skillId={gap.skill_id} onOpenTopic={onOpenTopic} />
+
+      <DiagnosticPanel studentId={studentId} skillId={gap.skill_id} skillName={gap.skill_name} startSignal={startSignal} onComplete={() => setDiagRefreshKey(k => k + 1)} />
 
       <PersonalizedPathPanel
         studentId={studentId}
         skillId={gap.skill_id}
         skillName={gap.skill_name}
-        knownPath={path}
         refreshKey={diagRefreshKey}
         startSignal={startSignal}
         focusSignal={focusSignal}
+        initialPath={initialPath}
         onPathChange={onPathChange}
         onCompetencyChange={onCompetencyChange}
       />
 
       {item && (
-        <>
+        <details className="focus-library focus-saved-pack">
+          <summary>Saved resource pack and roadmap <span>Optional reference</span></summary>
+          <div className="focus-saved-pack-content">
           <section className="learning-section compact legacy-learning-pack">
             <SectionTitle eyebrow="Saved Resources" title="Generated resource pack" meta="Compatibility view" />
             <p className="muted small section-copy">
@@ -860,17 +1338,17 @@ function SkillDetailPanel({ studentId, gap, item, path, roleTitle, startSignal, 
             <article className="learning-copy-card">
               <span>Learn</span>
               <h3>Explanation</h3>
-              <div className="md-body"><SafeMarkdown>{safeLegacyPackText(item.explanation)}</SafeMarkdown></div>
+              <div className="md-body"><SafeMarkdown>{item.explanation}</SafeMarkdown></div>
             </article>
             <article className="learning-copy-card">
               <span>Practice</span>
               <h3>Practice exercise</h3>
-              <div className="md-body"><SafeMarkdown>{safeLegacyPackText(item.practice_exercise)}</SafeMarkdown></div>
+              <div className="md-body"><SafeMarkdown>{item.practice_exercise}</SafeMarkdown></div>
             </article>
             <article className="learning-copy-card">
               <span>Build</span>
               <h3>Mini-project</h3>
-              <div className="md-body"><SafeMarkdown>{safeLegacyPackText(item.mini_project)}</SafeMarkdown></div>
+              <div className="md-body"><SafeMarkdown>{item.mini_project}</SafeMarkdown></div>
             </article>
           </div>
 
@@ -912,24 +1390,25 @@ function SkillDetailPanel({ studentId, gap, item, path, roleTitle, startSignal, 
               body="The path timeline component is ready; it will render backend roadmap steps as soon as they exist for this skill."
             />
           )}
-        </>
+          </div>
+        </details>
       )}
     </section>
   )
 }
 
-function DiagnosticPanel({ studentId, skillId, skillName, startSignal = 0, hasUsablePath = false, onComplete }: {
+function DiagnosticPanel({ studentId, skillId, skillName, startSignal = 0, onComplete }: {
   studentId: number
   skillId: number
   skillName: string
   startSignal?: number
-  hasUsablePath?: boolean
   onComplete?: () => void
 }) {
   const [phase, setPhase] = useState<'browse' | 'take' | 'result' | 'loading'>('loading')
   const [diag, setDiag] = useState<DiagnosticResult | null>(null)
   const [current, setCurrent] = useState<GeneratedDiagnostic | null>(null)
   const [form, setForm] = useState<Record<string, string>>({})
+  const [questionIndex, setQuestionIndex] = useState(0)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const handledStartSignal = useRef(0)
@@ -940,10 +1419,18 @@ function DiagnosticPanel({ studentId, skillId, skillName, startSignal = 0, hasUs
       const latest = await api.latestDiagnostic(studentId, skillId)
       setDiag(latest)
       setPhase(latest.completed_at ? 'result' : 'take')
-    } catch {
+      setQuestionIndex(0)
+    } catch (e: unknown) {
       setDiag(null)
       setPhase('browse')
+      setError((e as Error)?.message || 'Could not load the diagnostic')
     }
+  }
+
+  const retryLoad = () => {
+    setError('')
+    setPhase('loading')
+    void loadLatest()
   }
 
   useEffect(() => { if (studentId && skillId) void loadLatest() }, [studentId, skillId])
@@ -955,6 +1442,7 @@ function DiagnosticPanel({ studentId, skillId, skillName, startSignal = 0, hasUs
       const gen = await api.generateDiagnostic(studentId, skillId)
       setCurrent(gen)
       setForm({})
+      setQuestionIndex(0)
       setPhase('take')
     } catch (e: unknown) {
       setError((e as Error)?.message || 'Could not start the diagnostic')
@@ -997,8 +1485,6 @@ function DiagnosticPanel({ studentId, skillId, skillName, startSignal = 0, hasUs
     }
   }
 
-  if (hasUsablePath) return null
-
   if (phase === 'loading') {
     return (
       <section className="diagnostic-panel diag-loading" role="status" aria-label="Loading diagnostic">
@@ -1017,6 +1503,7 @@ function DiagnosticPanel({ studentId, skillId, skillName, startSignal = 0, hasUs
   }
 
   const questions = current?.questions ?? diag?.questions ?? []
+  const currentQuestion = questions[questionIndex]
 
   return (
     <section className="diagnostic-panel">
@@ -1033,7 +1520,12 @@ function DiagnosticPanel({ studentId, skillId, skillName, startSignal = 0, hasUs
         )}
       </div>
 
-      {error && <div className="error learning-error">{error}</div>}
+      {error && (
+        <div className="error learning-error phase7-retry-notice" role="alert" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+          <span>{error}</span>
+          <button type="button" className="btn btn-sm btn-secondary" onClick={retryLoad}>Retry</button>
+        </div>
+      )}
 
       {phase === 'browse' && (
         <p className="section-copy">
@@ -1044,8 +1536,10 @@ function DiagnosticPanel({ studentId, skillId, skillName, startSignal = 0, hasUs
 
       {phase === 'take' && (
         <>
-          <div className="diagnostic-questions">
-            {questions.map((q) => (
+          {currentQuestion ? <>
+            <div className="focus-diagnostic-progress" role="status">Question {questionIndex + 1} of {questions.length}<div className="progress-track on-light"><div className="progress-fill" style={{ width: `${((questionIndex + 1) / questions.length) * 100}%` }} /></div></div>
+          <div className="diagnostic-questions" aria-label={`Question ${questionIndex + 1} of ${questions.length}`}>
+            {(() => { const q = currentQuestion; return (
               <div className="diag-question" key={q.id}>
                 <div className="diag-q-meta">
                   <span className="chip-btn diag-comp-chip">{q.competency}</span>
@@ -1070,11 +1564,15 @@ function DiagnosticPanel({ studentId, skillId, skillName, startSignal = 0, hasUs
                             onChange={(e) => setForm((f) => ({ ...f, [q.id]: e.target.value }))} />
                 )}
               </div>
-            ))}
+            ) })()}
           </div>
-          <button className="btn btn-primary" onClick={submit} disabled={busy}>
-            {busy ? 'Scoring...' : 'Submit Diagnostic'}
-          </button>
+          <div className="focus-diagnostic-actions">
+            <button type="button" className="btn" onClick={() => setQuestionIndex((i) => Math.max(0, i - 1))} disabled={questionIndex === 0 || busy}>Back</button>
+            {questionIndex < questions.length - 1
+              ? <button type="button" className="btn btn-primary" onClick={() => setQuestionIndex((i) => Math.min(questions.length - 1, i + 1))} disabled={busy}>Next question <IconArrowRight size={14} /></button>
+              : <button type="button" className="btn btn-primary" onClick={submit} disabled={busy}>{busy ? 'Scoring...' : 'Submit Diagnostic'}</button>}
+          </div>
+          </> : <p className="muted small">This diagnostic has no questions yet. Try starting it again.</p>}
         </>
       )}
 
@@ -1083,6 +1581,13 @@ function DiagnosticPanel({ studentId, skillId, skillName, startSignal = 0, hasUs
           <div className="diag-result-score">
             <strong>{diag.score ?? '–'}%</strong>
             <span>overall</span>
+            <WhyThis>
+              Numerator: each topic's share of correctly answered diagnostic questions, averaged across topics.
+              Denominator: one per diagnostic topic. Source: GET /api/students/&lt;id&gt;/learning/&lt;skillId&gt;/diagnostic.
+              Rounding: 1 decimal in the backend, shown here as a whole percent. Included: this diagnostic's
+              questions only. Excluded: lesson Mini Checks and Final Assessments — a diagnostic never verifies
+              a skill and never changes your profile level.
+            </WhyThis>
           </div>
           <div className="diag-result-groups">
             <div className="diag-group strong"><h4>Strong Topics</h4>{topicList(diag.topic_results, 'mastered')}</div>
@@ -1116,90 +1621,78 @@ function LessonView({ studentId, skillId, skillName, competency, pathItem, pathI
 }) {
   const [lesson, setLesson] = useState<Lesson | null>(null)
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
+  const [lessonLoadError, setLessonLoadError] = useState('')
+  const [lessonRetryKey, setLessonRetryKey] = useState(0)
   const [tab, setTab] = useState<'learn' | 'example' | 'practice' | 'discuss' | 'mini_check'>(initialTab)
   const [miniAnswers, setMiniAnswers] = useState<Record<string, string>>({})
-  const [revealedMiniHints, setRevealedMiniHints] = useState<Set<string>>(() => new Set())
-  const [result, setResult] = useState<{ score: number; passed: boolean; correct: number; total: number } | null>(null)
+  const [result, setResult] = useState<MiniCheckResult | null>(null)
+  const [miniCheckError, setMiniCheckError] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [practiceAnswer, setPracticeAnswer] = useState('')
   const [followUpAnswer, setFollowUpAnswer] = useState('')
   const [practiceAttempt, setPracticeAttempt] = useState<PracticeAttempt | null>(null)
   const [practiceAttemptCount, setPracticeAttemptCount] = useState(0)
+  const [practiceHistoryError, setPracticeHistoryError] = useState('')
+  const [practiceHistoryRetryKey, setPracticeHistoryRetryKey] = useState(0)
   const [practiceSubmitting, setPracticeSubmitting] = useState(false)
   const [practiceError, setPracticeError] = useState('')
-  const [agentDecision, setAgentDecision] = useState<LearningAgentDecision | null>(null)
-  const [agentError, setAgentError] = useState('')
-  const [retryKey, setRetryKey] = useState(0)
-  const [learningLanguage, setLearningLanguage] = useState<'en' | 'ar'>(() => localStorage.getItem('sb_learning_language') === 'ar' ? 'ar' : 'en')
   const practiceInputRef = useRef<HTMLTextAreaElement | null>(null)
-  const ar = learningLanguage === 'ar'
-
-  useEffect(() => { localStorage.setItem('sb_learning_language', learningLanguage) }, [learningLanguage])
 
   // A focus signal can re-target an already-open lesson (Practice scenarios
   // quick-action or Continue) without remounting — apply the requested tab.
   useEffect(() => {
-    // The unified journey keeps discussion optional in the global copilot;
-    // a legacy deep-link to it opens the understandable first step instead.
-    setTab(initialTab === 'discuss' ? 'learn' : initialTab)
+    setTab(initialTab)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialTab])
 
   useEffect(() => {
     let alive = true
     setLoading(true)
+    setLessonLoadError('')
+    setLesson(null)
+    setResult(null)
+    setMiniAnswers({})
+    setMiniCheckError('')
     api.lessonGenerate(studentId, skillId, competency)
       .then(async (l) => {
         if (!alive) return
-        if (l.state === 'not_started') {
-          const startedLesson = await api.lessonStart(studentId, skillId, competency)
-          if (!alive) return
-          setLesson(startedLesson)
-          onStateChange?.(startedLesson.state)
-          return
-        }
-        setLesson(l)
-        onStateChange?.(l.state)
+        const nextLesson = l.state === 'not_started'
+          ? await api.lessonStart(studentId, skillId, competency)
+          : l
+        if (!alive) return
+        setLesson(nextLesson)
+        setResult(nextLesson.mini_check_result)
+        onStateChange?.(nextLesson.state)
       })
-      .catch((e) => { if (alive) setError(e?.message || 'Could not load lesson') })
+      .catch((e: unknown) => {
+        if (alive) setLessonLoadError(failureMessage(e, 'en', 'This lesson could not be loaded right now. Your saved progress is still safe.'))
+      })
       .finally(() => { if (alive) setLoading(false) })
     return () => { alive = false }
-  }, [studentId, skillId, competency, retryKey])
+  }, [studentId, skillId, competency, lessonRetryKey])
+
+  useEffect(() => {
+    if (tab === 'discuss') window.dispatchEvent(new CustomEvent('copilot:focus'))
+  }, [tab])
 
   useEffect(() => {
     if (!lesson) return
     let alive = true
+    setPracticeHistoryError('')
     api.lessonPracticeAttempts(studentId, skillId, competency)
       .then((res) => {
         if (!alive) return
         setPracticeAttempt(res.latest)
         setPracticeAttemptCount(res.count)
       })
-      .catch(() => {
+      .catch((e: unknown) => {
         if (!alive) return
         setPracticeAttempt(null)
         setPracticeAttemptCount(0)
+        setPracticeHistoryError(failureMessage(e, 'en', 'Practice history could not be loaded. Your lesson is still available.'))
       })
     return () => { alive = false }
-  }, [lesson?.id, studentId, skillId, competency])
-
-  const refreshAgent = useCallback(() => {
-    setAgentError('')
-    api.learningAgentNext(studentId, skillId)
-      .then(setAgentDecision)
-      .catch((e: unknown) => {
-        // Keep network/parser detail available to developers without putting a
-        // technical (and potentially misleading) failure into the student UI.
-        console.error('[Learning agent recommendation]', e)
-        setAgentDecision(null)
-        setAgentError(ar
-          ? 'تعذر تحميل توصية التعلّم. حاول مرة أخرى.'
-          : 'Recommendation unavailable. Please retry.')
-      })
-  }, [studentId, skillId, ar])
-
-  useEffect(() => { if (lesson) refreshAgent() }, [lesson?.id, refreshAgent])
+  }, [lesson?.id, studentId, skillId, competency, practiceHistoryRetryKey])
 
   const submitPractice = async (sourceAttemptId?: number | null) => {
     const answer = (sourceAttemptId ? followUpAnswer : practiceAnswer).trim()
@@ -1210,11 +1703,10 @@ function LessonView({ studentId, skillId, skillName, competency, pathItem, pathI
       const res = await api.lessonSubmitPractice(studentId, skillId, competency, answer, sourceAttemptId ?? null)
       setPracticeAttempt(res.attempt)
       setPracticeAttemptCount(res.attempts_count)
-      refreshAgent()
       if (sourceAttemptId) setFollowUpAnswer('')
       else setPracticeAnswer('')
     } catch (e: unknown) {
-      setPracticeError((e as Error)?.message || 'Practice evaluation failed')
+      setPracticeError(failureMessage(e, 'en', 'Practice evaluation failed. Your response was not saved.'))
     } finally {
       setPracticeSubmitting(false)
     }
@@ -1232,15 +1724,16 @@ function LessonView({ studentId, skillId, skillName, competency, pathItem, pathI
     const questions = lesson.content.mini_check.questions
     const orderedAnswers = questions.map((q) => miniAnswers[q.id] || '')
     setSubmitting(true)
+    setMiniCheckError('')
     try {
       const res = await api.lessonMiniCheck(studentId, skillId, competency, orderedAnswers)
-      setResult(res.lesson.mini_check_result || { score: 0, passed: false, correct: 0, total: questions.length })
+      const nextResult = res.lesson.mini_check_result || { score: 0, passed: false, correct: 0, total: questions.length }
+      setResult(nextResult)
       setLesson(res.lesson)
       onStateChange?.(res.lesson.state)
-      refreshAgent()
-      if (res.lesson.mini_check_result?.passed) onComplete()
+      if (nextResult.passed) onComplete()
     } catch (e: unknown) {
-      setError((e as Error)?.message || 'Submission failed')
+      setMiniCheckError(failureMessage(e, 'en', 'Mini Check submission failed. Your answers were not saved.'))
     } finally {
       setSubmitting(false)
     }
@@ -1248,16 +1741,12 @@ function LessonView({ studentId, skillId, skillName, competency, pathItem, pathI
 
   const isCompleted = lesson?.state === 'completed'
   const diagnosticPct = Math.round(pathItem.diagnostic_score)
-  const reasonForLearning = ar ? (pathItem.action === 'review'
-    ? `عندك الأساسيات، لكن التشخيص وضّح نقاط محتاجة مراجعة (${diagnosticPct}%).`
-    : `التشخيص وضّح إن الموضوع ده محتاج تدريب (${diagnosticPct}%).`) : pathItem.action === 'review'
+  const reasonForLearning = pathItem.action === 'review'
     ? `You understand the basics, but your diagnostic identified gaps to close (${pathItem.topic_status}, ${diagnosticPct}%).`
     : `Your diagnostic showed this topic needs improvement (${pathItem.topic_status}, ${diagnosticPct}%).`
 
   const tabs = ['learn', 'example', 'practice', 'mini_check'] as const
-  const tabLabels: Record<string, string> = ar
-    ? { learn: 'افهم', example: 'مثال', practice: 'تدريب', mini_check: 'تحقق سريع' }
-    : { learn: 'Understand', example: 'Example', practice: 'Practice', mini_check: 'Quick Check' }
+  const tabLabels: Record<string, string> = { learn: 'Learn', example: 'Example', practice: 'Practice', discuss: 'Discuss with AI', mini_check: 'Mini Check' }
 
   if (loading) {
     return (
@@ -1269,7 +1758,7 @@ function LessonView({ studentId, skillId, skillName, competency, pathItem, pathI
           </div>
         </div>
         <div className="lesson-nav">
-          {['Understand', 'Example', 'Practice', 'Mini Check'].map((t) => (
+          {['Learn', 'Example', 'Practice', 'Discuss', 'Mini Check'].map((t) => (
             <span key={t} className="skeleton" style={{ width: 74, height: 34, marginRight: 10, borderRadius: 6 }} />
           ))}
         </div>
@@ -1282,42 +1771,30 @@ function LessonView({ studentId, skillId, skillName, competency, pathItem, pathI
       </div>
     )
   }
-  if (error) return <div className="error learning-error">{error}<button className="btn-link" onClick={() => { setError(''); setRetryKey((key) => key + 1) }}>Retry</button><button className="btn-link" onClick={onClose}>Back to path</button></div>
+  if (lessonLoadError) {
+    return (
+      <div className="lesson-load-error error learning-error" role="alert">
+        <div><strong>This lesson could not be loaded.</strong><p>{lessonLoadError}</p></div>
+        <div className="lesson-load-error-actions">
+          <button type="button" className="btn btn-primary" onClick={() => setLessonRetryKey((key) => key + 1)}>Retry lesson</button>
+          <button type="button" className="btn" onClick={onClose}>Back to path</button>
+        </div>
+      </div>
+    )
+  }
   if (!lesson) return null
 
-  // The canonical question set is deliberately retained: its answer values
-  // are what the persisted Mini Check evaluates. Reviewed Arabic display
-  // fields only replace presentation. Answers remain canonical values, selected
-  // by index below, so translated options cannot change persisted scoring.
-  const localizedContent = ar ? lesson.content.locales?.ar : undefined
-  const content: LessonContent = localizedContent
-    ? {
-      ...lesson.content,
-      learn: localizedContent.learn ?? lesson.content.learn,
-      example: localizedContent.example ?? lesson.content.example,
-      practice: localizedContent.practice ?? lesson.content.practice,
-    }
-    : lesson.content
+  const content = lesson.content
   const recommendedResources = content.resources || []
-  const nextTab = () => {
-    const current = tab === 'discuss' ? 'learn' : tab
-    const idx = tabs.indexOf(current)
-    if (idx < tabs.length - 1) setTab(tabs[idx + 1])
+  const nextTab = () => { const idx = tabs.findIndex((step) => step === tab); setTab(tab === 'discuss' ? 'mini_check' : tabs[Math.min(tabs.length - 1, idx + 1)]) }
+  const previousTab = () => {
+    if (tab === 'learn') return
+    if (tab === 'mini_check') { setTab('practice'); return }
+    const sequence = [...tabs, 'discuss'] as const
+    const idx = sequence.indexOf(tab)
+    setTab(sequence[Math.max(0, idx - 1)])
   }
   const practiceData = (content.practice ?? {}) as LessonPractice
-  // Arabic question copy is display-only.  Preserve IDs and canonical answer
-  // values so the server scores precisely the questions it persisted.
-  const localizedQuestions = ar ? lesson.content.locales?.ar?.mini_check?.questions : undefined
-  const miniQuestions = lesson.content.mini_check.questions.map((question) => {
-    const display = localizedQuestions?.find((item) => item.id === question.id)
-    return display ? {
-      ...question,
-      question: display.question ?? question.question,
-      displayOptions: display.options ?? question.options,
-      misconception_hint: display.misconception_hint ?? question.misconception_hint,
-    } : { ...question, displayOptions: question.options }
-  })
-  const canonicalContent = content.canonical
   const practiceTitle = typeof practiceData.title === 'string' && practiceData.title.trim()
     ? practiceData.title
     : 'Practice task'
@@ -1340,29 +1817,11 @@ function LessonView({ studentId, skillId, skillName, competency, pathItem, pathI
   const followUpSourceAttemptId = latestRemediation?.practice_attempt_id ?? null
   const answeringFollowUp = !!latestRemediation
   const activePracticeAnswer = answeringFollowUp ? followUpAnswer : practiceAnswer
-  const agentActionArabic: Record<LearningAgentDecision['action_type'], string> = {
-    EXPLAIN: 'اقرأ الشرح والمثال أولاً.',
-    PRACTICE: 'نفّذ المهمة العملية ثم أرسل إجابتك للمراجعة.',
-    GIVE_HINT: 'استخدم التلميح المحدد ثم أعد المحاولة.',
-    REVIEW_PREREQUISITE: 'راجع المتطلب السابق المسجل ثم أعد المحاولة.',
-    MINI_CHECK: 'أكمل التحقق السريع عندما تكون مستعدًا.',
-    ADVANCE: 'انتقل إلى الخطوة التالية في المسار.',
-    REQUEST_REASSESSMENT: 'أكمل أو أعد التقييم التشخيصي أولاً.',
-  }
-  const reviewedPracticeFeedback = !practiceAttempt ? '' : (!ar
-    ? practiceAttempt.feedback
-    : practiceAttempt.status === 'ready'
-      ? 'مراجعة التدريب تشير إلى أن إجابتك تغطي النقاط الأساسية ويمكنك الانتقال إلى التحقق السريع. هذه ليست نتيجة اختبار تشغيل للكود ولا تحقق مهارة رسمياً.'
-      : 'مراجعة التدريب تشير إلى أن الإجابة تحتاج توضيحاً أو تطبيقاً أدق قبل التحقق السريع. راجع النقاط الناقصة ثم أعد المحاولة. هذه ليست نتيجة اختبار تشغيل للكود ولا تحقق مهارة رسمياً.')
 
   return (
     <div className="lesson-view">
       <div className="lesson-header">
-        <div className="lesson-language-control" aria-label="Learning language">
-          <button className={`chip-btn ${!ar ? 'active' : ''}`} onClick={() => setLearningLanguage('en')}>English</button>
-          <button className={`chip-btn ${ar ? 'active' : ''}`} onClick={() => setLearningLanguage('ar')}>العربية المصرية</button>
-        </div>
-        <button className="btn-link lesson-back" onClick={onClose}>&larr; {ar ? 'عرض المسار الكامل' : 'View full roadmap'}</button>
+        <button className="btn-link lesson-back" onClick={onClose}>&larr; Back to path</button>
         <div className="lesson-title-row">
           <span className="lesson-breadcrumb">{skillName} &gt; {humanizeTopicLabel(competency)}</span>
           <span className={`chip-btn lesson-mode-chip lesson-mode-${lesson.action}`}>{lesson.action}</span>
@@ -1370,136 +1829,138 @@ function LessonView({ studentId, skillId, skillName, competency, pathItem, pathI
         <div className="lesson-reason">
           <span className="muted small">{reasonForLearning}</span>
         </div>
-        {agentDecision && (
-          <section className="lesson-quality-section" aria-label="Learning agent feedback">
-            <div className="lesson-quality-label">{ar ? 'الخطوة التالية:' : 'Next step:'} {agentDecision.action_type.replace(/_/g, ' ')}</div>
-            {ar ? <p dir="rtl">{agentActionArabic[agentDecision.action_type]}</p> : <>
-              <p><strong>Objective:</strong> {agentDecision.objective}</p>
-              <p>{agentDecision.decision_reason}</p><p className="muted small">{agentDecision.next_step}</p>
-              <details><summary>Why this step?</summary><ul>{agentDecision.evidence.map((item, i) => <li key={i}>{item.detail}</li>)}</ul></details>
-            </>}
-          </section>
-        )}
-        {agentError && <div className="lesson-quality-section" role="alert">{agentError} <button className="btn-link" onClick={refreshAgent}>Retry recommendation</button></div>}
         {isCompleted && <div className="lesson-completed-banner"><IconCheck size={16} /> Topic completed</div>}
       </div>
 
-      <div className="lesson-nav">
-        {tabs.map((t) => (
-          <button key={t} className={`lesson-tab ${tab === t ? 'active' : ''}`}
-            onClick={() => setTab(t)}>
-            {tabLabels[t]}
+      <nav className="lesson-nav focus-lesson-steps" aria-label="Lesson steps">
+        {tabs.map((t, index) => (
+          <button key={t} type="button" className={`lesson-tab ${tab === t ? 'active' : ''}`} aria-current={tab === t ? 'step' : undefined} onClick={() => setTab(t)}>
+            <span className="focus-step-number">{index + 1}</span>{tabLabels[t]}
           </button>
         ))}
+      </nav>
+      <div className="focus-lesson-meta">
+        <span>{tab === 'discuss' ? 'Optional help' : `Step ${tabs.findIndex((step) => step === tab) + 1} of ${tabs.length}`}</span>
+        <button type="button" className="btn-link" onClick={() => setTab('discuss')}><IconChat size={14} /> Ask AI Tutor about this topic</button>
       </div>
+      <nav className="focus-lesson-navigation" aria-label="Lesson navigation">
+        <button type="button" className="btn" onClick={previousTab} disabled={tab === 'learn'}>Back</button>
+        {isCompleted && hasNext && onNext ? (
+          <button type="button" className="btn btn-primary" onClick={onNext}>Next Lesson <IconArrowRight size={14} /></button>
+        ) : !isCompleted && tab !== 'mini_check' ? (
+          <button type="button" className="btn btn-primary" onClick={nextTab}>
+            {tab === 'discuss' || (tab === 'practice' && practiceAttempt?.status === 'ready') ? 'Continue to Mini Check' : 'Continue'} <IconArrowRight size={14} />
+          </button>
+        ) : null}
+      </nav>
 
-      <div className="lesson-content" dir={ar ? 'rtl' : 'ltr'}>
+      <div className="lesson-content">
         {tab === 'learn' && (
           <div className="lesson-learn">
             <h3>{content.learn.title}</h3>
             <div className="lesson-explanation"><SafeMarkdown>{content.learn.explanation}</SafeMarkdown></div>
             {content.learn.key_ideas && content.learn.key_ideas.length > 0 && (
               <div className="lesson-key-ideas">
-                <h4>{ar ? 'أفكار أساسية' : 'Key Ideas'}</h4>
+                <h4>Key Ideas</h4>
                 <ul>{content.learn.key_ideas.map((idea, i) => <li key={i}>{idea}</li>)}</ul>
               </div>
             )}
             {content.learn.key_terms && Object.keys(content.learn.key_terms).length > 0 && (
               <div className="lesson-key-terms">
-                <h4>{ar ? 'مصطلحات أساسية' : 'Key Terms'}</h4>
+                <h4>Key Terms</h4>
                 {Object.entries(content.learn.key_terms).map(([term, def]) => (
                   <div className="lesson-term" key={term}><strong>{term}</strong>: {def}</div>
                 ))}
               </div>
             )}
-            {content.learn.job_relevance && (
-              <div className="lesson-quality-section">
-                <div className="lesson-quality-label">{ar ? 'ليه ده مهم في شغلك' : 'Why this matters for your role'}</div>
-                <p>{content.learn.job_relevance}</p>
-              </div>
-            )}
-            {content.learn.common_mistake && (
-              <div className="lesson-quality-section">
-                <div className="lesson-quality-label">{ar ? 'غلطة شائعة' : 'Common mistake'}</div>
-                <p>{content.learn.common_mistake}</p>
-              </div>
-            )}
-            {content.learn.worked_example && (
-              <div className="lesson-quality-section">
-                <div className="lesson-quality-label">{ar ? 'مثال محلول' : 'Worked example'}</div>
-                <p>{content.learn.worked_example}</p>
-              </div>
-            )}
-            {content.learn.depth_note && (
-              <div className="lesson-quality-section">
-                <p style={{ fontStyle: 'italic' }}>{content.learn.depth_note}</p>
-              </div>
-            )}
-            {content.learn.version_note && (
-              <div className="lesson-version-note">{content.learn.version_note}</div>
-            )}
-            {(canonicalContent?.prerequisites?.length ?? 0) > 0 && (
-              <div className="lesson-quality-section">
-                <div className="lesson-quality-label">{ar ? 'متطلبات سابقة' : 'Prerequisites'}</div>
-                <ul>{canonicalContent!.prerequisites.map((item) => <li key={item.competency}><strong>{item.competency}</strong> — {item.relationship}: {item.why}</li>)}</ul>
-              </div>
-            )}
-            {canonicalContent?.roadmap_rationale && (
-              <div className="lesson-quality-section">
-                <div className="lesson-quality-label">{ar ? 'ليه ده في مسارك' : 'Why this is in your roadmap'}</div>
-                <p>{canonicalContent.roadmap_rationale}</p>
-              </div>
-            )}
-            {content.learn.grounding_sources && content.learn.grounding_sources.length > 0 && (
-              <div className="lesson-grounding-sources">
-                {ar ? 'المصادر: ' : 'Sources: '}{content.learn.grounding_sources.map((s, i) => (
-                  <span key={i}>{i > 0 && ' · '}<a href={s.url} target="_blank" rel="noopener noreferrer">{s.title || s.source || 'Source'}</a></span>
-                ))}
-              </div>
-            )}
-            {recommendedResources.length > 0 && (
-              <section className="lesson-resource-panel" aria-label={ar ? 'مصادر مقترحة' : 'Recommended Resources'}>
-                <div className="lesson-resource-head">
-                  <div>
-                    <span>{ar ? 'مصادر مقترحة' : 'Recommended Resources'}</span>
-                    <strong>{ar ? `${recommendedResources.length} مصدر مُراجع` : `${recommendedResources.length} curated source${recommendedResources.length === 1 ? '' : 's'}`}</strong>
-                  </div>
-                </div>
-                <div className="lesson-resource-list">
-                  {recommendedResources.map((resource, i) => {
-                    const status = resourceStatus(resource)
-                    return (
-                      <a className="lesson-resource-card" href={resource.url} target="_blank" rel="noopener noreferrer" key={`${resource.url}-${i}`}>
-                        <div className="lesson-resource-card-head">
-                          <span className="resource-type">{resourceTypeLabel(resource)}</span>
-                          <span className={`lesson-resource-status ${status.key}`}>{status.label}</span>
-                        </div>
-                        <strong>{resource.title}</strong>
-                        <small>{resource.source || 'Curated source'}</small>
-                        {resource.reason && <p>{resource.reason}</p>}
-                        <span className="lesson-resource-open">Open resource <IconExternal size={13} /></span>
-                      </a>
-                    )
-                  })}
-                </div>
-              </section>
-            )}
-            {!isCompleted && <button className="btn btn-primary" onClick={nextTab}>{ar ? 'المتابعة إلى المثال' : 'Continue to example'}</button>}
-          </div>
-        )}
-        {tab === 'example' && (
+             <details className="lesson-optional-details">
+               <summary>Optional theory and lesson details <span>Role relevance, examples, and sources</span></summary>
+               <div className="lesson-optional-content">
+                 {content.learn.job_relevance && (
+                   <div className="lesson-quality-section">
+                     <div className="lesson-quality-label">Why this matters for your role</div>
+                     <p>{content.learn.job_relevance}</p>
+                   </div>
+                 )}
+                 {content.learn.common_mistake && (
+                   <div className="lesson-quality-section">
+                     <div className="lesson-quality-label">Common mistake</div>
+                     <p>{content.learn.common_mistake}</p>
+                   </div>
+                 )}
+                 {content.learn.worked_example && (
+                   <div className="lesson-quality-section">
+                     <div className="lesson-quality-label">Worked example</div>
+                     <p>{content.learn.worked_example}</p>
+                   </div>
+                 )}
+                 {content.learn.depth_note && (
+                   <div className="lesson-quality-section">
+                     <p style={{ fontStyle: 'italic' }}>{content.learn.depth_note}</p>
+                   </div>
+                 )}
+                 {content.learn.version_note && (
+                   <div className="lesson-version-note">{content.learn.version_note}</div>
+                 )}
+                 {content.learn.grounding_sources && content.learn.grounding_sources.length > 0 && (
+                   <div className="lesson-grounding-sources">
+                     Sources: {content.learn.grounding_sources.map((s, i) => (
+                       <span key={i}>{i > 0 && ' · '}<a href={s.url} target="_blank" rel="noopener noreferrer">{s.title || s.source || 'Source'}</a></span>
+                     ))}
+                   </div>
+                 )}
+               </div>
+             </details>
+             {recommendedResources.length > 0 && (
+               <details className="lesson-resource-details">
+                 <summary>Recommended Resources <span>{recommendedResources.length} curated source{recommendedResources.length === 1 ? '' : 's'}</span></summary>
+                 <section className="lesson-resource-panel" aria-label="Recommended Resources">
+                   <div className="lesson-resource-head">
+                     <div>
+                       <span>Recommended Resources</span>
+                       <strong>{recommendedResources.length} curated source{recommendedResources.length === 1 ? '' : 's'}</strong>
+                     </div>
+                   </div>
+                   <div className="lesson-resource-list">
+                     {recommendedResources.map((resource, i) => {
+                       const status = resourceStatus(resource)
+                       return (
+                         <a className="lesson-resource-card" href={resource.url} target="_blank" rel="noopener noreferrer" key={`${resource.url}-${i}`}>
+                           <div className="lesson-resource-card-head">
+                             <span className="resource-type">{resourceTypeLabel(resource)}</span>
+                             <span className={`lesson-resource-status ${status.key}`}>{status.label}</span>
+                           </div>
+                           <strong>{resource.title}</strong>
+                           <small>{resource.source || 'Curated source'}</small>
+                           {resource.reason && <p>{resource.reason}</p>}
+                           <span className="lesson-resource-open">Open resource <IconExternal size={13} /></span>
+                         </a>
+                       )
+                     })}
+                   </div>
+                 </section>
+               </details>
+             )}
+           </div>
+         )}
+         {tab === 'example' && (
           <div className="lesson-example">
             <h3>{content.example.title}</h3>
             <div className="lesson-example-type"><span className="chip-btn">{content.example.type}</span></div>
             <div className="lesson-example-content"><SafeMarkdown>{content.example.content}</SafeMarkdown></div>
-            <div className="lesson-explanation"><SafeMarkdown>{content.example.explanation}</SafeMarkdown></div>
-            {!isCompleted && <button className="btn btn-primary" onClick={nextTab}>{ar ? 'المتابعة إلى التدريب' : 'Continue to practice'}</button>}
-          </div>
+             <div className="lesson-explanation"><SafeMarkdown>{content.example.explanation}</SafeMarkdown></div>
+           </div>
         )}
         {tab === 'practice' && (
-          <div className="lesson-practice">
-            <h3>{ar ? 'تدريب' : 'Practice'}</h3>
-            {latestRemediation ? (
+           <div className="lesson-practice">
+             <h3>Practice</h3>
+             {practiceHistoryError && (
+               <div className="practice-history-error error learning-error" role="alert">
+                 <span>{practiceHistoryError}</span>
+                 <button type="button" className="btn btn-sm" onClick={() => setPracticeHistoryRetryKey((key) => key + 1)}>Retry history</button>
+               </div>
+             )}
+             {latestRemediation ? (
               <div className="remediation-panel">
                 <div className="remediation-head">
                   <span className="practice-task-label">Personalized Review</span>
@@ -1534,19 +1995,10 @@ function LessonView({ studentId, skillId, skillName, competency, pathItem, pathI
                 </div>
                 {practiceTitle && <h4 className="practice-task-title">{practiceTitle}</h4>}
                 <p className="lesson-q-text practice-task-text">{practiceTaskText}</p>
-                {practiceData.starter_code && <div className="lesson-example-content"><SafeMarkdown>{`\`\`\`${practiceData.language || 'python'}\n${practiceData.starter_code}\n\`\`\``}</SafeMarkdown></div>}
-                {practiceData.automated_tests && practiceData.automated_tests.length > 0 && (
-                  <div className="lesson-quality-section">
-                    <div className="lesson-quality-label">{ar ? 'حالات متوقعة' : 'Expected test cases'}</div>
-                    <ul>{practiceData.automated_tests.map((test, i) => <li key={i}>Input: {JSON.stringify(test.input)} → expected: {JSON.stringify(test.expected)}</li>)}</ul>
-                    <p className="muted small">{ar ? 'الأمثلة دي بتوضح السلوك المتوقع. كود المتعلم لا يتم تنفيذه هنا.' : 'These cases describe expected behavior. This practice submission is reviewed by the existing evaluator; learner code is not executed here.'}</p>
-                  </div>
-                )}
-                {practiceData.evaluation_note && <p className="muted small">{practiceData.evaluation_note}</p>}
               </div>
             )}
             <label className="practice-response-label" htmlFor={`practice-${lesson.id}`}>
-              {ar ? 'اكتب إجابتك للتدريب هنا' : `Your ${answeringFollowUp ? 'follow-up' : 'practice'} response`}
+              Your {answeringFollowUp ? 'follow-up' : 'practice'} response
             </label>
             <textarea
               id={`practice-${lesson.id}`}
@@ -1554,8 +2006,7 @@ function LessonView({ studentId, skillId, skillName, competency, pathItem, pathI
               className="practice-response"
               value={activePracticeAnswer}
               onChange={(e) => { if (answeringFollowUp) setFollowUpAnswer(e.target.value); else setPracticeAnswer(e.target.value) }}
-              placeholder={ar ? (answeringFollowUp ? 'اكتب إجابتك الجديدة للمهمة الموجهة.' : 'اكتب شرحك أو خطواتك أو الكود المطلوب.') : (answeringFollowUp ? 'Write your follow-up response to the targeted task.' : 'Write your explanation, steps, commands, or troubleshooting plan.')}
-              dir={ar ? 'rtl' : 'ltr'}
+              placeholder={answeringFollowUp ? 'Write your follow-up response to the targeted task.' : 'Write your explanation, steps, commands, or troubleshooting plan.'}
               disabled={practiceSubmitting || isCompleted}
             />
             <div className="practice-actions">
@@ -1565,7 +2016,7 @@ function LessonView({ studentId, skillId, skillName, competency, pathItem, pathI
                 disabled={practiceSubmitting || !activePracticeAnswer.trim() || isCompleted}
                 type="button"
               >
-                {practiceSubmitting ? (ar ? 'جارٍ المراجعة...' : 'Evaluating...') : (ar ? 'أرسل التدريب' : 'Submit Practice')}
+                {practiceSubmitting ? 'Evaluating...' : 'Submit Practice'}
               </button>
               {previousPracticeCount > 0 && (
                 <span className="muted small">{previousPracticeCount} previous practice {previousPracticeCount === 1 ? 'attempt' : 'attempts'}</span>
@@ -1574,7 +2025,7 @@ function LessonView({ studentId, skillId, skillName, competency, pathItem, pathI
             {practiceSubmitting && (
               <div className="practice-status evaluating" role="status">
                 <span className="practice-spinner" aria-hidden="true" />
-                <span>{ar ? 'جارٍ مراجعة تدريبك...' : 'Evaluating your practice...'}</span>
+                <span>Evaluating your practice...</span>
               </div>
             )}
             {practiceError && (
@@ -1584,68 +2035,96 @@ function LessonView({ studentId, skillId, skillName, competency, pathItem, pathI
               <div className={`practice-review ${practiceAttempt.status}`}>
                 <div className="practice-review-head">
                   <div>
-                    <span className="practice-task-label">{ar ? 'آخر محاولة' : latestPracticeLabel}</span>
-                    <h4>{ar ? 'مراجعة التدريب' : 'Practice Review'}</h4>
+                    <span className="practice-task-label">{latestPracticeLabel}</span>
+                    <h4>Practice Review</h4>
                   </div>
                   <div className="practice-score">
                     <strong>{Math.round(practiceAttempt.score)}%</strong>
-                    <span>{ar ? (practiceAttempt.status === 'ready' ? 'جاهز' : 'محتاج مراجعة') : (practiceAttempt.status === 'ready' ? 'Ready' : 'Needs review')}</span>
+                    <span>{practiceAttempt.status === 'ready' ? 'Ready' : 'Needs review'}</span>
+                    {' '}<WhyThis>
+                      Numerator: a 0–100 practice-review score from the evaluator named below (AI practice
+                      evaluation, or a deterministic basic review when AI is unavailable). Denominator: 100.
+                      Ready at 70 or above. Source: the lesson practice endpoint. Included: this one practice
+                      attempt. Excluded: it is practice feedback — it never grants a Verified Skill and never
+                      changes your level.
+                    </WhyThis>
                   </div>
                 </div>
                 <div className="practice-source">
-                  {ar ? 'مراجعة تدريب' : (practiceAttempt.source === 'ai' ? 'AI practice evaluation' : 'Basic automated review')}
+                  {practiceAttempt.source === 'ai' ? 'AI practice evaluation' : 'Basic automated review'}
                 </div>
-                {practiceAttempt.practice_task?.static_check && (
-                  <div className="lesson-quality-section">
-                    <div className="lesson-quality-label">{practiceAttempt.practice_task.static_check.kind === 'sql_text' ? (ar ? 'فحص ثابت لنص SQL' : 'Static SQL text check') : (ar ? 'فحص ثابت للكود' : 'Static code check')}</div>
-                    <p>{practiceAttempt.practice_task.static_check.status === 'looks_structurally_sound' ? (practiceAttempt.practice_task.static_check.kind === 'sql_text' ? (ar ? 'نص الاستعلام يطابق البنية المطلوبة بشكل ظاهر.' : 'The submitted query has the required visible structure.') : 'The submitted function has a sound visible structure.') : (practiceAttempt.practice_task.static_check.kind === 'sql_text' ? (ar ? 'نص الاستعلام يحتاج مراجعة بنيوية.' : 'The submitted query needs a structural revision.') : 'The submitted code needs a structural revision.')}</p>
-                    <ul>{practiceAttempt.practice_task.static_check.checks.map((check, i) => <li key={i}>{check}</li>)}</ul>
-                    <p className="muted small">{practiceAttempt.practice_task.static_check.note}</p>
-                  </div>
-                )}
-                <p className="practice-feedback">{reviewedPracticeFeedback}</p>
-                {(practiceAttempt.status === 'ready' || practiceAttempt.practice_task?.static_check?.status === 'looks_structurally_sound') && (
-                  <div className="practice-ready-banner"><IconCheck size={16} /> {ar ? (practiceAttempt.status === 'ready' ? 'جاهز للتحقق السريع' : 'الفحص الثابت يسمح بتجربة التحقق السريع، وليس تشغيل للكود') : (practiceAttempt.status === 'ready' ? 'Ready for Mini Check' : 'Static check supports trying the Mini Check (not runtime execution)')}</div>
+                <p className="practice-feedback">{practiceAttempt.feedback}</p>
+                {practiceAttempt.status === 'ready' && (
+                  <div className="practice-ready-banner"><IconCheck size={16} /> Ready for Mini Check</div>
                 )}
                 <div className="practice-review-grid">
                   <div>
-                    <h5>{ar ? 'نقاط قوية' : 'Strengths'}</h5>
+                    <h5>Strengths</h5>
                     <ul>
                       {practiceAttempt.strengths.map((item, i) => <li key={i}>{item}</li>)}
                     </ul>
                   </div>
                   <div>
-                    <h5>{ar ? 'يحتاج تحسين' : 'Needs improvement'}</h5>
+                    <h5>Needs improvement</h5>
                     <ul>
                       {practiceAttempt.missing_points.map((item, i) => <li key={i}>{item}</li>)}
                     </ul>
                   </div>
                 </div>
                 <div className="practice-next-action">
-                  <strong>{ar ? 'الخطوة الجاية' : 'Next action'}</strong>
-                  <span>{ar ? 'راجع المهمة وعدّل إجابتك حسب النقاط الناقصة.' : practiceAttempt.next_action}</span>
+                  <strong>Next action</strong>
+                  <span>{practiceAttempt.next_action}</span>
                 </div>
                 {!isCompleted && (
                   <button className="btn btn-primary" onClick={retryPractice} type="button">
-                    {ar ? 'حاول تاني' : 'Try Again'}
+                    Try Again
                   </button>
                 )}
               </div>
             )}
-            {!isCompleted && (practiceAttempt?.status === 'ready' || practiceAttempt?.practice_task?.static_check?.status === 'looks_structurally_sound') ? (
-              <button className="btn btn-primary" onClick={nextTab}>{ar ? 'المتابعة إلى التحقق السريع' : 'Continue to Mini Check'}</button>
+            {!isCompleted && practiceAttempt?.status === 'ready' ? (
+              <button className="btn btn-primary" onClick={nextTab}>Continue to Mini Check</button>
             ) : !isCompleted ? (
               <button className="btn" onClick={nextTab}>Continue</button>
             ) : null}
           </div>
         )}
-        {tab === 'mini_check' && (
+        {tab === 'discuss' && (
+          <div className="lesson-discuss">
+            <div className="lesson-discuss-head">
+              <h3>Discuss with AI</h3>
+              <p className="muted small">Ask the tutor anything about {humanizeTopicLabel(competency)} — your background, skill, and this exact step are already in the tutor's context.</p>
+            </div>
+            <div className="lesson-discuss-goto">
+              <p className="muted small">
+                The AI Tutor lives in the panel at the bottom-right of every page. Open it — it already knows
+                you're learning <strong>{humanizeTopicLabel(competency)}</strong> on <strong>{skillName}</strong>.
+              </p>
+              <button
+                className="btn btn-primary"
+                onClick={() => window.dispatchEvent(new CustomEvent('copilot:focus'))}
+                type="button"
+              >
+                <IconChat size={15} /> Open AI Tutor
+              </button>
+             </div>
+           </div>
+         )}
+         {tab === 'mini_check' && (
           <div className="lesson-mini-check">
-            <h3>{ar ? 'تحقق سريع' : 'Mini Check'}</h3>
+            <h3>Mini Check</h3>
             {result ? (
               <div className={`lesson-result ${result.passed ? 'passed' : 'failed'}`}>
                 <div className="lesson-result-score">{Math.round(result.score * 100)}%</div>
                 <div className="lesson-result-detail">{result.correct}/{result.total} correct</div>
+                <div className="muted small">
+                  <WhyThis>
+                    Numerator: Mini Check questions answered correctly. Denominator: total Mini Check questions
+                    (shown above as correct/total). Source: the lesson Mini Check endpoint. Rounding: nearest
+                    whole percent. Passed at 70%. Included: this Mini Check only — passing completes the topic
+                    but never grants a Verified Skill, which only a Final Assessment can do.
+                  </WhyThis>
+                </div>
                 {result.passed ? (
                   <div className="lesson-result-msg passed-msg"><IconCheck size={16} /> Passed — topic completed!</div>
                 ) : (
@@ -1657,16 +2136,24 @@ function LessonView({ studentId, skillId, skillName, competency, pathItem, pathI
                   {result.passed && <button className="btn" onClick={onClose}>Back to Path</button>}
                 </div>
               </div>
-            ) : (
-              <>
-                {miniQuestions.map((q) => (
+             ) : isCompleted ? (
+               <div className="lesson-result lesson-completed-result">
+                 <div className="lesson-result-msg passed-msg"><IconCheck size={16} /> Topic completed. This lesson is already saved and cannot be changed.</div>
+                 <div className="lesson-result-actions">
+                   {hasNext && onNext && <button className="btn btn-primary" onClick={onNext}>Next Lesson <IconArrowRight size={15} /></button>}
+                   <button className="btn" onClick={onClose}>Back to Path</button>
+                 </div>
+               </div>
+             ) : (
+                 <>
+                 {content.mini_check.questions.map((q) => (
                   <div className="lesson-question" key={q.id}>
                     <p className="lesson-q-text">{q.question}</p>
                     {q.type === 'mcq' && q.options && (
                       <div className="lesson-options">
-                        {(q.displayOptions || q.options).map((opt, i) => (
-                          <button key={i} className={`lesson-option ${miniAnswers[q.id] === q.options![i] ? 'selected' : ''}`}
-                            onClick={() => setMiniAnswers({ ...miniAnswers, [q.id]: q.options![i] })}>
+                        {q.options.map((opt, i) => (
+                          <button key={i} className={`lesson-option ${miniAnswers[q.id] === opt ? 'selected' : ''}`}
+                            onClick={() => setMiniAnswers({ ...miniAnswers, [q.id]: opt })}>
                             {opt}
                           </button>
                         ))}
@@ -1677,19 +2164,12 @@ function LessonView({ studentId, skillId, skillName, competency, pathItem, pathI
                         onChange={(e) => setMiniAnswers({ ...miniAnswers, [q.id]: e.target.value })}
                         placeholder="Type your answer..." />
                     )}
-                    {q.misconception_hint && (
-                      revealedMiniHints.has(q.id)
-                        ? <p className="muted small">{ar ? 'تلميح: ' : 'Hint: '}{q.misconception_hint}</p>
-                        : <button className="btn-link mini-hint-toggle" type="button"
-                            onClick={() => setRevealedMiniHints((shown) => new Set(shown).add(q.id))}>
-                            {ar ? 'أحتاج تلميحًا' : 'Need a hint?'}
-                          </button>
-                    )}
                   </div>
-                ))}
-                <button className="btn btn-primary" onClick={submitMiniCheck} disabled={submitting}>
-                  {submitting ? (ar ? 'جارٍ التصحيح...' : 'Scoring...') : (ar ? 'أرسل التحقق السريع' : 'Submit Mini Check')}
-                </button>
+                 ))}
+                 {miniCheckError && <div className="mini-check-error error learning-error" role="alert">{miniCheckError}</div>}
+                 <button className="btn btn-primary" onClick={submitMiniCheck} disabled={submitting}>
+                   {submitting ? 'Scoring...' : 'Submit Mini Check'}
+                 </button>
               </>
             )}
           </div>
@@ -1699,28 +2179,28 @@ function LessonView({ studentId, skillId, skillName, competency, pathItem, pathI
   )
 }
 
-function PersonalizedPathPanel({ studentId, skillId, skillName, knownPath = null, refreshKey = 0, startSignal = 0, focusSignal, onPathChange, onCompetencyChange }: {
+function PersonalizedPathPanel({ studentId, skillId, skillName, refreshKey = 0, startSignal = 0, focusSignal, initialPath, onPathChange, onCompetencyChange }: {
   studentId: number
   skillId: number
   skillName: string
-  knownPath?: PersonalizedPath | null
   refreshKey?: number
   startSignal?: number
   focusSignal?: { competency: string; signal: number; tab?: 'learn' | 'example' | 'practice' | 'discuss' | 'mini_check' } | null
+  initialPath?: PersonalizedPath | null
   onPathChange?: (path: PersonalizedPath | null) => void
   onCompetencyChange?: (competency: string | null) => void
 }) {
-  // The parent already has the current path for a Continue Learning card.
-  // Seed from it so the one-shot navigation signal cannot be lost while this
-  // panel independently refreshes the same path from the API.
-  const [path, setPath] = useState<PersonalizedPath | null>(knownPath)
-  const [ready, setReady] = useState(!!knownPath)
-  const [diagnosticDone, setDiagnosticDone] = useState(false)
+  const [path, setPath] = useState<PersonalizedPath | null>(initialPath ?? null)
+  const [ready, setReady] = useState(false)
+  const [retryKey, setRetryKey] = useState(0)
+  const [diagnosticDone, setDiagnosticDone] = useState(Boolean(initialPath))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [showMastered, setShowMastered] = useState(false)
-  const [done, setDone] = useState<string[]>([])
+  const [done, setDone] = useState<string[]>(initialPath ? [...initialPath.progress] : [])
   const [lessonStates, setLessonStates] = useState<Record<string, Lesson['state']>>({})
+  const [lessonReviews, setLessonReviews] = useState<Record<string, { passed?: boolean } | null>>({})
+  const [showAllTopics, setShowAllTopics] = useState(false)
   const [openCompetency, setOpenCompetency] = useState<string | null>(null)
   const [focusTab, setFocusTab] = useState<'learn' | 'example' | 'practice' | 'discuss' | 'mini_check'>('learn')
   const [finalStatus, setFinalStatus] = useState<FinalAssessmentStatus | null>(null)
@@ -1744,23 +2224,25 @@ function PersonalizedPathPanel({ studentId, skillId, skillName, knownPath = null
   const syncLessonStates = async (nextPath: PersonalizedPath | null) => {
     if (!nextPath) {
       setLessonStates({})
+      setLessonReviews({})
       return {}
     }
     const entries = await Promise.all(nextPath.items.map(async (item) => {
       try {
         const lesson = await api.lessonGet(studentId, skillId, item.competency)
-        return [item.competency, lesson.state] as const
+        return [item.competency, lesson.state, lesson.mini_check_result] as const
       } catch {
-        return [item.competency, 'not_started' as Lesson['state']] as const
+        return [item.competency, 'not_started' as Lesson['state'], null] as const
       }
     }))
-    const states = Object.fromEntries(entries) as Record<string, Lesson['state']>
+    const states = Object.fromEntries(entries.map(([competency, state]) => [competency, state])) as Record<string, Lesson['state']>
+    const reviews = Object.fromEntries(entries.map(([competency, , review]) => [competency, review])) as Record<string, { passed?: boolean } | null>
     setLessonStates(states)
+    setLessonReviews(reviews)
     return states
   }
 
   const openCurrentTopic = (nextPath: PersonalizedPath, states: Record<string, Lesson['state']> = lessonStates) => {
-    if (nextPath.stale) return
     const completed = new Set(nextPath.progress ?? [])
     const current =
       nextPath.items.find((item) => states[item.competency] === 'in_progress' && !completed.has(item.id)) ||
@@ -1790,12 +2272,8 @@ function PersonalizedPathPanel({ studentId, skillId, skillName, knownPath = null
         setDiagnosticDone(true)
         onPathChange?.(res)
       }
-    } catch {
-      setPath(null)
-      setDone([])
-      setLessonStates({})
-      setDiagnosticDone(false)
-      onPathChange?.(null)
+    } catch (e: unknown) {
+      setError(failureMessage(e, 'en', 'This personalized path could not be loaded. Your saved progress is still safe.'))
     } finally {
       setReady(true)
     }
@@ -1809,7 +2287,7 @@ function PersonalizedPathPanel({ studentId, skillId, skillName, knownPath = null
       void loadPath()
       void loadFinalStatus()
     }
-  }, [studentId, skillId, refreshKey])
+  }, [studentId, skillId, refreshKey, retryKey])
 
   const create = async (autoOpen = false) => {
     setBusy(true)
@@ -1830,7 +2308,7 @@ function PersonalizedPathPanel({ studentId, skillId, skillName, knownPath = null
         if (autoOpen) openCurrentTopic(res, states)
       }
     } catch (e: unknown) {
-      setError((e as Error)?.message || 'Could not create your learning path')
+      setError(failureMessage(e, 'en', 'Could not create your learning path. Your existing progress is still safe.'))
     } finally {
       setBusy(false)
     }
@@ -1849,7 +2327,7 @@ function PersonalizedPathPanel({ studentId, skillId, skillName, knownPath = null
     if (!ready || !startSignal || handledStartSignal.current === startSignal) return
     if (path) {
       handledStartSignal.current = startSignal
-      if (!path.stale) openCurrentTopic(path)
+      openCurrentTopic(path)
       return
     }
     if (diagnosticDone) {
@@ -1860,12 +2338,14 @@ function PersonalizedPathPanel({ studentId, skillId, skillName, knownPath = null
 
   useEffect(() => {
     if (!ready || !path || !focusSignal || handledFocusSignal.current === focusSignal.signal) return
-    const found = path.items.find((it) => it.competency === focusSignal.competency)
+    const normalize = (value: string) => value.toLowerCase().replace(/[_\s-]+/g, ' ').trim()
+    const requested = normalize(focusSignal.competency)
+    const found = path.items.find((it) => normalize(it.competency) === requested || normalize(it.title) === requested)
     if (!found) return
     handledFocusSignal.current = focusSignal.signal
-    setOpenCompetency(focusSignal.competency)
+    setOpenCompetency(found.competency)
     setFocusTab(focusSignal.tab ?? 'learn')
-    compRef.current?.(focusSignal.competency)
+    compRef.current?.(found.competency)
   }, [focusSignal, ready, path])
 
   if (!ready) return null
@@ -1900,6 +2380,7 @@ function PersonalizedPathPanel({ studentId, skillId, skillName, knownPath = null
     return 'Not started'
   }
   const stateClass = (state: string) => state.toLowerCase().replace(/\s+/g, '-')
+  const currentCompetency = path?.items.find((item) => !completedIds.has(item.id))?.competency ?? null
 
   return (
     <section className="personalized-path-panel">
@@ -1914,7 +2395,23 @@ function PersonalizedPathPanel({ studentId, skillId, skillName, knownPath = null
         )}
       </div>
 
-      {error && <div className="error learning-error">{error}</div>}
+      {path && path.stale && (
+        <div className="pp-stale-note" role="note">
+          <IconAlert size={15} />
+          <span>
+            This path was built from an <strong>earlier diagnostic</strong>. A newer completed
+            diagnostic exists, so these topics may no longer reflect your current results and
+            do not count toward Final Assessment readiness. Create a fresh path to realign it.
+          </span>
+        </div>
+      )}
+
+      {error && (
+        <div className="error learning-error path-panel-error" role="alert">
+          <span>{error}</span>
+          <button type="button" className="btn btn-sm" onClick={() => setRetryKey((key) => key + 1)}>Retry path</button>
+        </div>
+      )}
 
       {!path && diagnosticDone && (
         <div className="pp-create-call">
@@ -1936,18 +2433,6 @@ function PersonalizedPathPanel({ studentId, skillId, skillName, knownPath = null
 
       {path && (
         <>
-          {path.stale && (
-            <div className="pp-stale-call" role="alert">
-              <p className="section-copy">
-                This path was built from an older diagnostic (diagnostic #{path.diagnostic_id}).
-                A newer completed diagnostic supersedes it — refresh the path before continuing so
-                lessons match your current gaps.
-              </p>
-              <button className="btn btn-primary" onClick={() => void create(false)} disabled={busy}>
-                <IconBolt size={16} /> {busy ? 'Refreshing...' : 'Refresh path from latest diagnostic'}
-              </button>
-            </div>
-          )}
           <div className="pp-progress-summary">
             <div>
               <strong>{progress.done} / {progress.total} topics complete</strong>
@@ -1955,39 +2440,58 @@ function PersonalizedPathPanel({ studentId, skillId, skillName, knownPath = null
             </div>
             <div className="lp-track"><span style={{ width: `${progress.pct}%` }} /></div>
             <p className="muted small">
-              Topics complete only after a Mini Check pass. This does not create a Verified Skill.
+              Topics complete only after a Mini Check pass. This does not create a Verified Skill.{' '}
+              <WhyThis>
+                Numerator: topics on this personalized path whose Mini Check you passed. Denominator: topics on
+                this path. Source: GET /api/students/&lt;id&gt;/learning/&lt;skillId&gt;/personalized-path (progress list).
+                Rounding: nearest whole percent. Included: Mini Check completions for this path. Excluded:
+                diagnostic mastery and Final Assessments. Study progress never grants a Verified Skill — only a
+                proctored Final Assessment on the Assessments page does.
+              </WhyThis>
             </p>
           </div>
 
           <div className="pp-timeline">
-            {path.items.map((item) => {
+            {(showAllTopics ? path.items : path.items.slice(0, 8)).map((item) => {
               const isDone = done.includes(item.id)
               const topicState = stateFor(item)
+              const isCurrent = item.competency === currentCompetency
               return (
-                <div className={`pp-item ${isDone ? 'is-done' : ''}`} key={item.id}>
+                <div className={`pp-item ${isDone ? 'is-done' : ''} ${isCurrent ? 'is-current' : ''}`} key={item.id}>
                   <div className={`pp-state-dot pp-state-${stateClass(topicState)}`}>
                     {isDone ? <IconCheck size={15} /> : <span />}
                   </div>
                   <div className="pp-item-body" onClick={() => openLesson(item.competency)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter') openLesson(item.competency) }}>
                     <div className="pp-item-top">
                       <span className="pp-order">{String(item.order).padStart(2, '0')}</span>
+                      <MilestoneChip state={topicMilestoneState(isDone, isCurrent, lessonStates[item.competency], lessonReviews[item.competency])} />
                       <span className={`chip-btn pp-status-chip pp-status-${item.topic_status}`}>{cap(item.topic_status)}</span>
                       <span className={`chip-btn pp-action-chip pp-action-${item.action}`}>{item.action}</span>
                       <span className={`chip-btn pp-topic-state pp-topic-state-${stateClass(topicState)}`}>{topicState}</span>
                     </div>
                     <h4>{humanizeTopicLabel(item.title)}</h4>
                     <p className="muted small">
-                      {path.stale ? (
-                        <>This older roadmap belongs to diagnostic #{path.diagnostic_id}; its scores are hidden until you refresh from diagnostic #{path.latest_diagnostic_id}.</>
-                      ) : (
-                        <>Added because your diagnostic score was <strong>{Math.round(item.diagnostic_score)}%</strong>.</>
-                      )}
+                      Added because your diagnostic score was <strong>{Math.round(item.diagnostic_score)}%</strong>.
+                      {' '}<WhyThis>
+                        Numerator: correctly answered questions for this topic on your diagnostic. Denominator:
+                        questions asked for this topic. Source: the saved diagnostic for this skill. Rounding:
+                        nearest whole percent. A low score is why the topic is on the path; a mastered topic is
+                        skipped instead. It never counts toward verification.
+                      </WhyThis>
                       {' '}<span className="pp-est"><IconClock size={13} /> ~{item.estimated_minutes} min</span>
                     </p>
                   </div>
                 </div>
               )
             })}
+
+            {!showAllTopics && path.items.length > 8 && (
+              <div className="pp-more-wrap">
+                <button type="button" className="pp-more-toggle" onClick={() => setShowAllTopics(true)}>
+                  <IconChevron size={14} /> Show all {path.items.length - 8} more topics
+                </button>
+              </div>
+            )}
 
             {path.stages.map((stage) => {
               const isDone = done.includes(stage.id)
@@ -2000,6 +2504,7 @@ function PersonalizedPathPanel({ studentId, skillId, skillName, knownPath = null
                     </div>
                     <div className="pp-item-body">
                       <div className="pp-item-top">
+                        <MilestoneChip state={stageMilestoneState(isDone, false)} />
                         <span className="chip-btn pp-status-chip pp-status-milestone">milestone</span>
                         <span className={`chip-btn pp-action-chip pp-action-${isDone ? 'done' : 'available'}`}>
                           {isDone ? 'completed' : 'Available anytime'}
@@ -2022,6 +2527,7 @@ function PersonalizedPathPanel({ studentId, skillId, skillName, knownPath = null
                   </div>
                   <div className="pp-item-body">
                     <div className="pp-item-top">
+                      <MilestoneChip state={stageMilestoneState(isDone, !isDone)} />
                       <span className="chip-btn pp-status-chip pp-status-milestone">milestone</span>
                       <span className={`chip-btn pp-action-chip pp-action-${lockState}`}>{lockState}</span>
                     </div>
@@ -2062,6 +2568,13 @@ function PersonalizedPathPanel({ studentId, skillId, skillName, knownPath = null
                 available from the Assessments page; every required competency below must score 70%
                 or higher for the attempt to pass.
               </p>
+              {finalStatus.path_stale && (
+                <p className="muted small pp-stale-inline" role="note">
+                  <IconAlert size={13} /> Your learning path is stale (built from an earlier
+                  diagnostic), so its completed topics are not counted here. Only your latest
+                  completed diagnostic counts toward coverage.
+                </p>
+              )}
               <div className="plan-coverage">
                 {finalStatus.readiness.required.map((slug) => {
                   const covered = finalStatus.readiness.satisfied.includes(slug)
@@ -2080,6 +2593,134 @@ function PersonalizedPathPanel({ studentId, skillId, skillName, knownPath = null
         </>
       )}
     </section>
+  )
+}
+
+function roadmapToMarkdown(map: CareerRoadmap): string {
+  const lines: string[] = []
+  if (map.summary) { lines.push(map.summary, '') }
+  ;(map.phases || []).forEach((phase) => {
+    lines.push(`## Phase ${phase.phase}: ${phase.title}`)
+    if (phase.goal) lines.push(`Goal: ${phase.goal}`)
+    const names = (phase.skills || []).map((s) => s.name).filter(Boolean)
+    if (names.length) lines.push(`Develops: ${names.join(', ')}`)
+    ;(Array.isArray(phase.deliverables) ? phase.deliverables : []).forEach((d) => {
+      lines.push(`- ${String(d ?? '')}`)
+    })
+    lines.push('')
+  })
+  return lines.join('\n').trim()
+}
+
+function VerificationReport({ studentId, map }: { studentId: number; map: CareerRoadmap }) {
+  const [report, setReport] = useState<RoadmapValidation | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [noCv, setNoCv] = useState(false)
+  const [revised, setRevised] = useState<string | null>(null)
+  const [notice, setNotice] = useState('')
+  const [applying, setApplying] = useState(false)
+
+  useEffect(() => {
+    let alive = true
+    setLoading(true)
+    setReport(null)
+    setRevised(null)
+    setNotice('')
+    setNoCv(false)
+    const draft = roadmapToMarkdown(map)
+    api.cvText(studentId)
+      .then(({ cv_text }) => {
+        if (!alive) return
+        setNoCv(!cv_text)
+        return api.validateRoadmap({ draft_roadmap: draft, student_cv: cv_text || '', role_id: 'soc_analyst' })
+          .then((r) => { if (alive) setReport(r) })
+      })
+      .catch(() => { if (alive) setReport(null) })
+      .finally(() => { if (alive) setLoading(false) })
+    return () => { alive = false }
+  }, [studentId, map])
+
+  if (!report || report.error) {
+    return loading ? (
+      <div className="vr-panel" role="status">
+        <strong>Verification Report</strong>
+        <span className="muted small">Validating against NIST NICE v2.1 and MITRE ATT&amp;CK Enterprise…</span>
+      </div>
+    ) : (
+      <div className="vr-panel">
+        <strong>Verification Report</strong>
+        <span className="muted small">Verification unavailable for this roadmap.</span>
+      </div>
+    )
+  }
+
+  const failed = (report.violations || []).filter((v) => !v.passed)
+  const coveragePct = Math.round((report.coverage_score ?? 0) * 100)
+  const personalizationPct = Math.round((report.personalization_score ?? 0) * 100)
+
+  const apply = async () => {
+    setApplying(true)
+    setNotice('')
+    try {
+      const res = await api.applyCorrections({
+        draft_roadmap: roadmapToMarkdown(map),
+        violations: report.violations || [],
+      })
+      setRevised(res.revised_roadmap)
+      setNotice(`Roadmap updated — ${failed.length} corrections applied.`)
+    } catch {
+      setNotice('Could not apply corrections. Please try again.')
+    } finally {
+      setApplying(false)
+    }
+  }
+
+  return (
+    <div className="vr-panel">
+      <div className="vr-head">
+        <strong>Verification Report</strong>
+        {report.source === 'fallback' && <span className="vr-badge">fallback</span>}
+      </div>
+      {noCv && (
+        <p className="vr-warn" role="alert">
+          No CV uploaded — personalization score is unavailable. Upload your CV to see a personalized roadmap.
+        </p>
+      )}
+      <div className="vr-scores">
+        <div className="vr-score"><span>Coverage</span><b>{coveragePct}%</b></div>
+        <div className="vr-score"><span>Personalization</span><b>{personalizationPct}%</b></div>
+      </div>
+      <p className="small muted">
+        <WhyThis>
+          These scores grade the generated career roadmap, not your profile. Coverage is the share of the
+          role's required topics the roadmap addresses; personalization is the share that references your CV
+          and target role. Source: the roadmap validator (live or labelled fallback). Rounding: nearest whole
+          percent. Excluded: they are not requirement coverage, not verified skills and not a hiring signal.
+        </WhyThis>
+      </p>
+      <ul className="vr-checks">
+        {(report.violations || []).map((v, i) => (
+          <li key={i} className={v.passed ? 'pass' : 'fail'}>
+            <span className={`vr-badge ${v.passed ? 'pass' : 'fail'}`}>{v.passed ? 'PASS' : 'FAIL'}</span>
+            <span className="vr-check-name">{v.check_name || 'CHECK'}</span>
+            <span className="vr-evidence">{v.evidence}</span>
+          </li>
+        ))}
+      </ul>
+      {failed.length > 0 && (
+        <button type="button" className="btn btn-sm btn-primary" onClick={apply} disabled={applying}>
+          {applying ? 'Applying…' : 'Apply Corrections'}
+        </button>
+      )}
+      {notice && <p className="vr-notice" role="status">{notice}</p>}
+      {revised !== null && (
+        <div className="vr-revised">
+          <strong>Revised Roadmap</strong>
+          <div className="md-body"><SafeMarkdown>{revised}</SafeMarkdown></div>
+        </div>
+      )}
+      <p className="vr-footer small muted">Verified against NIST NICE v2.1 and MITRE ATT&amp;CK Enterprise</p>
+    </div>
   )
 }
 
@@ -2105,13 +2746,14 @@ function CareerRoadmapCard({ studentId, roleTitle }: { studentId: number; roleTi
   if (!map || !Array.isArray(map.phases) || !map.phases.length) return null
 
   return (
-    <section className="learning-section career-roadmap-section">
+    <section className="learning-section career-roadmap-section" id="career-roadmap">
       <SectionTitle
         eyebrow="Career Roadmap"
         title="High-level career journey"
         meta={`${map.phase_count ?? map.phases.length} phases - ${map.role_title || roleTitle || 'your target role'}`}
       />
       <p className="section-copy">{map.summary}</p>
+      <VerificationReport studentId={studentId} map={map} />
       <div className="cr-phases">
         {map.phases.map((phase) => {
           const open = openPhase === phase?.phase

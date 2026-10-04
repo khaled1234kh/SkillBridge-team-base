@@ -3,6 +3,7 @@ import type {
   DiagnosticResult, GeneratedDiagnostic, GoogleConfig, LearningItem, Lesson, QuizQuestion, PublicProfile, RoleRecord, RolesResponse, RoleSkillCoverage, Skill, Student,
   Session, TutorConversation, TutorMessage, InterviewReply, UniversityStatsResponse, UniversityOption, RecentJob, RecentJobsResponse, LocationOption,
   PersonalizedPath, PersonalizedPathItem, PersonalizedStage, PersonalizedPathResponse, FinalAssessmentStatus, PracticeAttempt, PracticeAttemptsResponse,
+  LearningAgentDecision,
   EscoMarketResponse, RoleRecommendationsResponse,
   ScenarioLibrary, ScenarioPlayer, ScenarioResult, ScenarioHint, ScenarioHistory, SavedRolesResponse,
   RoleMappingSuggestion, RoleMappingEvent,
@@ -11,6 +12,9 @@ import type {
   RecentRole, RecentRolesResponse,
   RoleProvenance, JobsHealthPayload, JobLinkReport,
   CopilotConfigResponse, CopilotOnboardingStateResponse, CopilotOnboardingSubmit, CopilotOnboardingResponse,
+  StudentTourState, TourStateUpdate,
+  MentorUiState, MentorUiUpdate,
+  RoadmapValidation, RoadmapViolation,
 } from './types'
 import type { AssessmentIntegrityEvent } from './webcamIntegrity'
 
@@ -24,6 +28,38 @@ export function getToken(): string | null {
 export function setToken(token: string | null) {
   if (token) localStorage.setItem(TOKEN_KEY, token)
   else localStorage.removeItem(TOKEN_KEY)
+}
+
+const SAFE_DETAIL_MAX = 220
+
+// Phase 7 privacy: server `detail` strings must never leak API keys, credentials,
+// or raw internal diagnostics to students. Only pass through short, human-aimed
+// messages; anything else collapses to the canonical status form.
+function sanitizeServerDetail(status: number, raw: string): string {
+  const fallback = `Request failed: ${status}`
+  if (typeof raw !== 'string' || !raw.trim() || raw === fallback) return raw.trim() ? raw : fallback
+  const s = raw.trim()
+  if (s.length > SAFE_DETAIL_MAX) {
+    console.error('[api] detail too long for student UI:', s)
+    return fallback
+  }
+  const dangerous = [
+    /(sk-|api[_-]?key|api_secret|secret|credential|password|authorization|bearer)["'=\s:]/i,
+    /(BEGIN (RSA |OPENSSH )?PRIVATE KEY|BEGIN CERTIFICATE)/,
+    /https?:\/\/[^\s"'<>]+:[^@\s"'<>]+@/, // url with embedded credentials
+    /\b[Aa]uthorization\s*:/,
+  ]
+  if (dangerous.some((re) => re.test(s))) {
+    console.error('[api] detail contains credential-like content, blocked:', s)
+    return fallback
+  }
+  // Provider/DB raw diagnostics typically contain braces, stack frames, "Traceback",
+  // or "Exception" clauses — not aimed at students.
+  if (/\{|Traceback|^\s*File "|Exception:|raised HTTPException|detail=/.test(s)) {
+    console.error('[api] detail looks like internal diagnostics, blocked:', s)
+    return fallback
+  }
+  return s
 }
 
 async function req<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -41,7 +77,11 @@ async function req<T>(path: string, options: RequestInit = {}): Promise<T> {
       if (data && data.detail) detail = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail)
     } catch { /* non-JSON error body */ }
     if (res.status === 401) setToken(null)
-    throw new Error(detail)
+    // Privacy: the server detail string can carry raw provider/DB diagnostics.
+    // Surface only a safe canonical form to the UI; log the raw text for operators.
+    const safe = sanitizeServerDetail(res.status, detail)
+    if (detail !== safe) console.error(`[api] ${path} server detail sanitized:`, detail)
+    throw new Error(safe)
   }
   return res.json() as Promise<T>
 }
@@ -61,7 +101,9 @@ async function reqBlob(path: string, options: RequestInit = {}): Promise<Blob> {
       if (data && data.detail) detail = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail)
     } catch { /* non-JSON error body */ }
     if (res.status === 401) setToken(null)
-    throw new Error(detail)
+    const safe = sanitizeServerDetail(res.status, detail)
+    if (detail !== safe) console.error(`[api] ${path} server detail sanitized:`, detail)
+    throw new Error(safe)
   }
   return res.blob()
 }
@@ -151,6 +193,7 @@ export const api = {
         let detail = 'CV upload failed'
         try { const d = await res.json(); detail = d.detail || detail } catch { /* ignore */ }
         if (res.status === 401) setToken(null)
+        detail = sanitizeServerDetail(res.status, String(detail))
         throw new Error(detail)
       }
       return res.json()
@@ -197,8 +240,6 @@ export const api = {
     req<DiagnosticResult>(`/api/students/${studentId}/learning/${skillId}/diagnostic/submit`, { method: 'POST', body: JSON.stringify(body) }),
   latestDiagnostic: (studentId: number, skillId: number) =>
     req<DiagnosticResult>(`/api/students/${studentId}/learning/${skillId}/diagnostic/latest`),
-  learningAgentNext: (studentId: number, skillId: number) =>
-    req<import('./types').LearningAgentDecision>(`/api/students/${studentId}/learning/${skillId}/orchestrator/next`),
 
   personalizedPath: (studentId: number, skillId: number) =>
     req<PersonalizedPathResponse>(`/api/students/${studentId}/learning/${skillId}/personalized-path`),
@@ -223,6 +264,9 @@ export const api = {
   lessonMiniCheck: (studentId: number, skillId: number, competency: string, answers: string[]) =>
     req<{ lesson: Lesson; path_progress: string[] }>(`/api/students/${studentId}/learning/${skillId}/lessons/${encodeURIComponent(competency)}/mini-check`, { method: 'POST', body: JSON.stringify({ answers }) }),
 
+  learningAgentNext: (studentId: number, skillId: number) =>
+    req<LearningAgentDecision>(`/api/students/${studentId}/learning/${skillId}/orchestrator/next`),
+
   publicProfile: (studentId: number) => req<PublicProfile>(`/api/public/verified/${studentId}`),
 
   tutorConversations: (studentId: number, includeEmpty = false) =>
@@ -242,13 +286,13 @@ export const api = {
     reqBlob(`/api/students/${studentId}/tutor/tts`, { method: 'POST', body: JSON.stringify({ tutor, text }) }),
   tutorStt: (studentId: number, audio: string, language: string) =>
     req<{ text: string }>(`/api/students/${studentId}/tutor/stt`, { method: 'POST', body: JSON.stringify({ audio, language }) }),
-  tutorSend: (studentId: number, message: string, opts: { skillId?: number | null; page?: string; competency?: string | null; jobTitle?: string | null; jobUrl?: string | null; tutorId?: string | null; mode?: string | null; language?: string | null; conversationId?: number | null; spoken?: boolean } = {}) =>
-    req<TutorMessage & { reply?: string; tutor_id?: string; mode?: string; language?: string; conversation_id?: number | null; conversation?: TutorConversation }>(`/api/students/${studentId}/tutor`, { method: 'POST', body: JSON.stringify({ message, skill_id: opts.skillId ?? null, page: opts.page ?? 'dashboard', competency: opts.competency ?? null, job_title: opts.jobTitle ?? null, job_url: opts.jobUrl ?? null, tutor_id: opts.tutorId ?? null, mode: opts.mode ?? null, language: opts.language ?? null, conversation_id: opts.conversationId ?? null, spoken: opts.spoken === true }) }),
+  tutorSend: (studentId: number, message: string, opts: { skillId?: number | null; page?: string; competency?: string | null; jobTitle?: string | null; jobUrl?: string | null; tutorId?: string | null; mode?: string | null; language?: string | null; conversationId?: number | null; spoken?: boolean; turn?: number | null } = {}) =>
+    req<TutorMessage & { reply?: string; tutor_id?: string; mode?: string; language?: string; conversation_id?: number | null; conversation?: TutorConversation }>(`/api/students/${studentId}/tutor`, { method: 'POST', body: JSON.stringify({ message, skill_id: opts.skillId ?? null, page: opts.page ?? 'dashboard', competency: opts.competency ?? null, job_title: opts.jobTitle ?? null, job_url: opts.jobUrl ?? null, tutor_id: opts.tutorId ?? null, mode: opts.mode ?? null, language: opts.language ?? null, conversation_id: opts.conversationId ?? null, spoken: opts.spoken === true, turn: opts.turn ?? null }) }),
   tutorPreference: (studentId: number) => req<{ tutor_id: string; mode?: string; language?: string }>(`/api/students/${studentId}/tutor/preference`),
   // Abortable twin of tutorSend — the voice session cancels the in-flight tutor
   // request when the student speaks again. Same payload, same endpoint.
-  tutorSendAbortable: (studentId: number, message: string, opts: { skillId?: number | null; page?: string; competency?: string | null; jobTitle?: string | null; jobUrl?: string | null; tutorId?: string | null; mode?: string | null; language?: string | null; conversationId?: number | null; spoken?: boolean } = {}, signal?: AbortSignal) =>
-    req<TutorMessage & { reply?: string; tutor_id?: string; mode?: string; language?: string; conversation_id?: number | null; conversation?: TutorConversation }>(`/api/students/${studentId}/tutor`, { method: 'POST', body: JSON.stringify({ message, skill_id: opts.skillId ?? null, page: opts.page ?? 'dashboard', competency: opts.competency ?? null, job_title: opts.jobTitle ?? null, job_url: opts.jobUrl ?? null, tutor_id: opts.tutorId ?? null, mode: opts.mode ?? null, language: opts.language ?? null, conversation_id: opts.conversationId ?? null, spoken: opts.spoken === true }), signal }),
+  tutorSendAbortable: (studentId: number, message: string, opts: { skillId?: number | null; page?: string; competency?: string | null; jobTitle?: string | null; jobUrl?: string | null; tutorId?: string | null; mode?: string | null; language?: string | null; conversationId?: number | null; spoken?: boolean; turn?: number | null } = {}, signal?: AbortSignal) =>
+    req<TutorMessage & { reply?: string; tutor_id?: string; mode?: string; language?: string; conversation_id?: number | null; conversation?: TutorConversation }>(`/api/students/${studentId}/tutor`, { method: 'POST', body: JSON.stringify({ message, skill_id: opts.skillId ?? null, page: opts.page ?? 'dashboard', competency: opts.competency ?? null, job_title: opts.jobTitle ?? null, job_url: opts.jobUrl ?? null, tutor_id: opts.tutorId ?? null, mode: opts.mode ?? null, language: opts.language ?? null, conversation_id: opts.conversationId ?? null, spoken: opts.spoken === true, turn: opts.turn ?? null }), signal }),
   setTutorPreference: (studentId: number, patch: { tutor_id?: string; mode?: string; language?: string } = {}) =>
     req<{ tutor_id: string; mode: string; language: string }>(`/api/students/${studentId}/tutor/preference`, { method: 'PUT', body: JSON.stringify(patch) }),
   copilotConfig: (studentId: number) =>
@@ -259,6 +303,14 @@ export const api = {
     req<CopilotOnboardingStateResponse>(`/api/students/${studentId}/copilot/onboarding-state`),
   submitCopilotOnboarding: (studentId: number, body: CopilotOnboardingSubmit) =>
     req<CopilotOnboardingResponse>(`/api/students/${studentId}/copilot/onboarding`, { method: 'POST', body: JSON.stringify(body) }),
+  tourState: (studentId: number) =>
+    req<StudentTourState>(`/api/students/${studentId}/tour/state`),
+  setTourState: (studentId: number, body: TourStateUpdate) =>
+    req<StudentTourState>(`/api/students/${studentId}/tour/state`, { method: 'PUT', body: JSON.stringify(body) }),
+  mentorUi: (studentId: number) =>
+    req<MentorUiState>(`/api/students/${studentId}/mentor/ui`),
+  setMentorUi: (studentId: number, body: MentorUiUpdate) =>
+    req<MentorUiState>(`/api/students/${studentId}/mentor/ui`, { method: 'PUT', body: JSON.stringify(body) }),
   startAssessmentSession: (studentId: number, skillId: number, externalToken?: string | null, webcamGate?: { passed: boolean; checked_at: string; meta?: Record<string, string | number | boolean> }) =>
     req<{ active: boolean; skill_id: number; webcam_gate?: { required: boolean; passed: boolean } }>(`/api/students/${studentId}/assessments/session`, { method: 'POST', body: JSON.stringify({ skill_id: skillId, external_token: externalToken || undefined, webcam_gate: webcamGate }) }),
   endAssessmentSession: (studentId: number) =>
@@ -271,6 +323,8 @@ export const api = {
     req<{ available: boolean; api_key_loaded: boolean; tutor_voices_loaded: Record<string, boolean> }>(`/api/students/${studentId}/interview/voice`),
   interviewTts: (studentId: number, tutor: string, text: string) =>
     reqBlob(`/api/students/${studentId}/interview/tts`, { method: 'POST', body: JSON.stringify({ tutor, text }) }),
+  tutorInterviewSummary: (studentId: number, opts: { language?: string; conversationId?: number | null } = {}, signal?: AbortSignal) =>
+    req<{ summary: string; language: string; mode?: string; tutor_id?: string; conversation_id?: number; turns?: number; chars?: number }>(`/api/students/${studentId}/interview/summary`, { method: 'POST', body: JSON.stringify({ language: opts.language ?? null, conversation_id: opts.conversationId ?? null }), signal }),
 
   generateAssessment: (studentId: number, skillId: number, opts: { practice?: boolean; num_questions?: number } = {}) =>
     req<GeneratedAssessment>(`/api/students/${studentId}/assessments/generate`, { method: 'POST', body: JSON.stringify({ skill_id: skillId, practice: !!opts.practice, num_questions: opts.num_questions || 10 }) }),
@@ -314,6 +368,13 @@ export const api = {
 
   // ---- full career roadmap
   careerRoadmap: (studentId: number) => req<CareerRoadmap>(`/api/students/${studentId}/career-roadmap`),
+  cvText: (studentId: number) => req<{ cv_text: string }>(`/api/students/${studentId}/cv-text`),
+
+  // ---- agentic roadmap validation (wraps the roadmap generator)
+  validateRoadmap: (payload: { draft_roadmap: string; student_cv: string; role_id: string }) =>
+    req<RoadmapValidation>(`/api/agent/validate-roadmap`, { method: 'POST', body: JSON.stringify(payload) }),
+  applyCorrections: (payload: { draft_roadmap: string; violations: RoadmapViolation[] }) =>
+    req<{ revised_roadmap: string }>(`/api/agent/apply-corrections`, { method: 'POST', body: JSON.stringify(payload) }),
 
   // ---- practice scenarios
   scenarios: (studentId: number) => req<ScenarioLibrary>(`/api/students/${studentId}/scenarios`),

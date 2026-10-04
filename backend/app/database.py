@@ -1051,6 +1051,104 @@ def _migration_0013_tutor_conversations(conn):
         )
 
 
+def _migration_0014_conversation_live_meta(conn):
+    """Phase 4D - conversation session metadata.
+
+    Phase 5 (4D) reuses the conversation threads for BOTH Live modes
+    (Conversation and Interview) and must persist clear session metadata on the
+    thread so History can show what kind of session happened. Adds a defaulted
+    ``mode`` column (chat/practice/discuss/interview — last explicit mode of the
+    thread) and a ``language`` column (the resolved reply language of the most
+    recent turn). Columns are additive; existing rows keep their defaults. The
+    guard is defensive: on a DB where migration 0013 has not created the table
+    yet (partial migration subsets in legacy-upgrade tests), this is a no-op.
+    """
+    table = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='tutor_conversations'"
+    ).fetchone()
+    if not table:
+        return
+    conv_columns = [r["name"] for r in conn.execute("PRAGMA table_info(tutor_conversations)").fetchall()]
+    if "mode" not in conv_columns:
+        conn.execute(
+            "ALTER TABLE tutor_conversations ADD COLUMN mode TEXT NOT NULL DEFAULT 'chat' "
+            "CHECK(mode IN ('chat','practice','discuss','interview'))"
+        )
+    if "language" not in conv_columns:
+        conn.execute(
+            "ALTER TABLE tutor_conversations ADD COLUMN language TEXT"
+        )
+
+
+def _migration_0015_student_tour_state(conn):
+    """Phase 4 - per-student product tour state.
+
+    Persists each user's tour state server-side, scoped to the authenticated
+    student (Phase 4 backend requirement — never localStorage-only):
+
+    - ``tour_version`` — a major versioned tour id; on a future major version
+      bump with a clear reason, not_seen can legitimately re-arm the tour.
+    - ``welcome_state`` — the global welcome tour lifecycle
+      (not_seen / active / completed / skipped). Auto-show only fires on
+      not_seen (brand-new account sees the tour exactly once).
+    - ``dont_show_again`` — the explicit "Don't show again" toggle, distinct
+      from a one-off skip so both required controls are honored.
+    - ``mini_states_json`` — contextual per-page mini-tour completion map
+      ({roles|learning|assessments} -> not_seen|completed).
+
+    Single row per student; never-written students read back synthetic
+    not_seen defaults via the model helper.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS student_tour_state (
+            student_id INTEGER PRIMARY KEY REFERENCES students(id) ON DELETE CASCADE,
+            tour_version TEXT NOT NULL DEFAULT 'v1',
+            welcome_state TEXT NOT NULL DEFAULT 'not_seen'
+                CHECK(welcome_state IN ('not_seen','active','completed','skipped')),
+            dont_show_again INTEGER NOT NULL DEFAULT 0,
+            mini_states_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+
+
+def _migration_0016_mentor_ui_preferences(conn):
+    """Phase 5 - per-student mentor UI visibility preference.
+
+    The mentor (Copilot) can be hidden behind a compact launcher. Phase 5
+    backend requirement: the chosen state must persist server-side per
+    authenticated student, so the panel (which is localStorage-free by
+    contract) reads/writes this row instead of a browser cache.
+
+    - ``panel_visible`` — 1 = floating mentor panel shown, 0 = hidden behind
+      the compact launcher. Defaults to visible so a never-written student's
+      experience is unchanged.
+
+    Single row per student; never-written students read back the synthetic
+    ``panel_visible: true`` default via the model helper.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS mentor_ui_preferences (
+            student_id INTEGER PRIMARY KEY REFERENCES students(id) ON DELETE CASCADE,
+            panel_visible INTEGER NOT NULL DEFAULT 1 CHECK(panel_visible IN (0,1)),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+
+
+def _migration_0017_cv_text(conn):
+    """Persist the raw CV text so the roadmap validator can personalize.
+
+    Previously only ``cv_filename`` and the extracted skills were stored; the
+    raw extracted CV text was discarded. The agentic roadmap validator needs
+    the CV body (CV_REDUNDANCY / LEVEL_APPROPRIATENESS checks), so the upload
+    route now stores the extracted text here.
+    """
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(students)").fetchall()]
+    if "cv_text" not in cols:
+        conn.execute("ALTER TABLE students ADD COLUMN cv_text TEXT")
+
+
 MIGRATIONS = [
     {"id": "0001_baseline_implied_schema", "apply": _migration_0001_baseline},
     {"id": "0002_auth_sessions", "apply": _migration_0002_auth_sessions},
@@ -1065,6 +1163,10 @@ MIGRATIONS = [
     {"id": "0011_mentor_keys", "apply": _migration_0011_mentor_keys},
     {"id": "0012_tutor_memory", "apply": _migration_0012_tutor_memory},
     {"id": "0013_tutor_conversations", "apply": _migration_0013_tutor_conversations},
+    {"id": "0014_conversation_live_meta", "apply": _migration_0014_conversation_live_meta},
+    {"id": "0015_student_tour_state", "apply": _migration_0015_student_tour_state},
+    {"id": "0016_mentor_ui_preferences", "apply": _migration_0016_mentor_ui_preferences},
+    {"id": "0017_cv_text", "apply": _migration_0017_cv_text},
 ]
 
 

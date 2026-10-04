@@ -24,7 +24,7 @@ Honesty rules (locked by tests):
 """
 import datetime
 
-from . import jobs, matching, recommendations
+from . import jobs, matching, metrics, recommendations
 
 TARGET_ROLE_MATCH_FORMULA = "target-role-match"
 TARGET_ROLE_MATCH_VERSION = "target-role-match-v1"
@@ -131,8 +131,10 @@ def target_role_match_breakdown(student):
                  "No score was changed; refusing to present a wrong sum.")
     missing_rows = [d for d in detail if d["status"] == "missing"]
     gap_rows = [d for d in detail if d["status"] == "gap"]
-    if not missing_rows and not gap_rows:
-        next_action = "You meet this role's skill requirements — keep your evidence current."
+    complete = not missing_rows and not gap_rows
+    if complete:
+        next_action = ("Your evidence currently meets this role's requirements — "
+                       "keep it current and verify where you can.")
     else:
         first = (missing_rows or gap_rows)[0]
         verb = "Learn or verify" if first["status"] == "missing" else "Close the gap on"
@@ -141,6 +143,9 @@ def target_role_match_breakdown(student):
     return {
         "formula": TARGET_ROLE_MATCH_FORMULA,
         "version": TARGET_ROLE_MATCH_VERSION,
+        "metric_key": metrics.TARGET_REQUIREMENT_COVERAGE,
+        "metric_label": metrics.definitions()[metrics.TARGET_REQUIREMENT_COVERAGE]["label"],
+        "complete": complete,
         "as_of": _as_of(),
         "role_data_version": _role_data_version(role),
         "role_title": role.get("title"),
@@ -245,6 +250,8 @@ def role_match_breakdown(student, query):
     return {
         "formula": ROLE_MATCH_FORMULA,
         "version": ROLE_MATCH_VERSION,
+        "metric_key": metrics.TARGET_REQUIREMENT_COVERAGE,
+        "metric_label": metrics.definitions()[metrics.TARGET_REQUIREMENT_COVERAGE]["label"],
         "as_of": _as_of(),
         "role_data_version": rec.get("source_version") or "local",
         "role_id": rec.get("role_id"),
@@ -392,10 +399,13 @@ def job_match_breakdown(student, fingerprint, location="", country="", market=""
     elif not constraints["location"]["supported"]:
         next_action = "Consider adding this market as a relocation/remote search."
     else:
-        next_action = "This is a strong current fit."
+        next_action = ("This is a keyword-level fit, not an evidence claim — verify "
+                       "a matched skill to strengthen it.")
     return {
         "formula": JOB_MATCH_FORMULA,
         "version": JOB_MATCH_VERSION,
+        "metric_key": metrics.CATALOGUE_SIMILARITY,
+        "metric_label": "Job posting match",
         "as_of": _as_of(),
         "role_data_version": _role_data_version(student.get("target_role")),
         "role_title": role_title,

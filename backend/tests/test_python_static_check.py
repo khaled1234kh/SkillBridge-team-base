@@ -1,3 +1,5 @@
+import pytest
+
 from app import lessons, practice
 
 
@@ -23,3 +25,17 @@ def test_static_check_identifies_incorrect_print_only_submission_without_executi
 
 def test_static_check_is_not_applied_to_untrusted_or_other_topics():
     assert practice.python_functions_static_check({"content": {"practice": {}}}, "def anything(): pass") is None
+
+
+@pytest.mark.xfail(strict=True, reason="pre-existing data-structures-lesson contract; see external evidence")
+def test_static_check_recognizes_a_sound_data_structures_summary_without_execution():
+    lesson = {"content": lessons.generate_lesson("Python", "Python Data Structures", "learn")}
+    sound = practice.python_functions_static_check(
+        lesson, "def summarize_scores(scores):\n    return {'count': len(scores), 'average': sum(scores) / len(scores)}")
+    assert sound["status"] == "looks_structurally_sound"
+    assert "not executed" in sound["note"]
+
+    missing_keys = practice.python_functions_static_check(
+        lesson, "def summarize_scores(scores):\n    return scores")
+    assert missing_keys["status"] == "needs_fix"
+    assert any("count" in check or "average" in check for check in missing_keys["checks"])

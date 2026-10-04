@@ -1,4 +1,4 @@
-"""End-to-end contracts for the curated Python topics."""
+"""End-to-end contracts for the only complete curated CS topics."""
 from urllib.parse import quote
 
 import pytest
@@ -43,15 +43,17 @@ def test_curated_python_diagnostic_is_exactly_tagged_and_path_is_prerequisite_or
     generated, path = _make_path(client, student_id, headers, python)
 
     assert len(generated["questions"]) == 6
-    assert {q["competency"] for q in generated["questions"]} == {"python_functions", "python_error_handling"}
+    assert {q["competency"] for q in generated["questions"]} == {
+        "python_functions", "python_error_handling"}
     functions_text = " ".join(f"{q['question']} {q['correct_answer']}" for q in generated["questions"] if q["competency"] == "python_functions").lower()
     errors_text = " ".join(f"{q['question']} {q['correct_answer']}" for q in generated["questions"] if q["competency"] == "python_error_handling").lower()
     assert "return" in functions_text and "parameter" in functions_text
     assert "valueerror" in errors_text and "try" in errors_text
-    assert [item["competency"] for item in path["items"]] == ["python_functions", "python_error_handling"]
+    assert [item["competency"] for item in path["items"]] == [
+        "python_functions", "python_error_handling"]
 
 
-def test_both_curated_python_topics_complete_without_verifying_skill_and_cache_exact_answer(
+def test_all_curated_python_topics_complete_without_verifying_skill_and_cache_exact_answer(
         client, student_id, auth_headers):
     headers = auth_headers("aisha@student.edu")
     python = models.get_skill_by_name("Python")
@@ -60,6 +62,7 @@ def test_both_curated_python_topics_complete_without_verifying_skill_and_cache_e
     answers = {
         "python_functions": "def celsius_to_fahrenheit(celsius):\n    return (celsius * 9 / 5) + 32\n\nreturn lets the caller reuse and test the converted value.",
         "python_error_handling": "def parse_score(text):\n    try:\n        return int(text)\n    except ValueError:\n        return None\n\nA bare except could hide an unrelated programming bug.",
+        "python_data_structures": "def summarize_scores(scores):\n    return {'count': len(scores), 'average': sum(scores) / len(scores)}\n\nA dictionary makes the two named results explicit.",
     }
     for item in path["items"]:
         base = _url(student_id, python["id"], item["competency"])

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { VoiceSession } from '../lib/voiceSession'
-import type { SpeechRecognitionAdapter, VoiceErrorKind, VoiceSessionAdapters, VoiceState, VoiceTranscriptItem } from '../lib/voiceSession'
+import type { SpeechRecognitionAdapter, VoiceErrorKind, VoiceModeToken, VoiceSessionAdapters, VoiceState, VoiceTranscriptItem } from '../lib/voiceSession'
 import { useTTSPlayer } from './useTTSPlayer'
 
 // React wrapper around the framework-free voice engine
@@ -26,6 +26,16 @@ function browserWindow(): BrowserSpeechWindow | null {
 /** Last explicitly selected Live speech language, persisted locally so an Auto
  *  chat preference re-opens Live in the user's last choice. */
 const LIVE_LANG_KEY = 'sb_live_lang'
+/** Last explicitly selected Live session mode (Conversation | Interview),
+ *  persisted locally so Live re-opens in the user's last mode (Phase 4D). */
+const LIVE_MODE_KEY = 'sb_live_mode'
+
+function readStoredMode(pref: VoiceModeToken | undefined): VoiceModeToken {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage.getItem(LIVE_MODE_KEY) === 'interview') return 'interview'
+  } catch { /* storage unavailable */ }
+  return pref === 'interview' ? 'interview' : 'chat'
+}
 
 /** Resolve the EXPLICIT Live speech language at the moment Live opens.
  *  An already-explicit chat preference (English / Arabic) decides directly; an
@@ -105,17 +115,25 @@ export interface UseVoiceSessionOptions {
   language: 'en' | 'ar'
   recognitionSupported: boolean
   /** Abortable api.tutorSendAbortable wrapper; must resolve the reply text.
-   *  `opts.language` = the explicit Live language to send ('en' | 'ar'). */
-  send: (text: string, signal: AbortSignal, opts?: { language?: 'en' | 'ar' }) => Promise<string>
+   *  `opts.language` = the explicit Live language to send ('en' | 'ar').
+   *  Phase 4D: Interview mode forwards `opts.mode` + `opts.interviewTurn` so the
+   *  spoken mock interview drives the backend interview engine. */
+  send: (text: string, signal: AbortSignal, opts?: { language?: 'en' | 'ar'; mode?: VoiceModeToken; interviewTurn?: number }) => Promise<string>
+  /** Deterministic Live-interview summary (Phase 4D). Returns the summary text. */
+  interviewSummary?: (signal: AbortSignal, opts: { language: 'en' | 'ar' }) => Promise<string>
   onAssistantReply?: (text: string) => void
   onUserMessage?: (text: string) => void
   onTrace?: (stage: string, meta?: Record<string, unknown>) => void
+  /** Fires whenever the Live session mode switches (Phase 4D). */
+  onModeChange?: (mode: VoiceModeToken) => void
   /** Persists the last chosen Live speech language locally (localStorage) so an
    *  Auto chat preference re-opens Live in the last-used language. */
   onLiveLanguageChange?: (lang: 'en' | 'ar') => void
   /** Server-STT-only mode (Brave): pass `true` to skip browser STT entirely.
    *  Turns are driven through `injectTranscript()` from VoiceMode. */
   skipBrowserStt?: boolean
+  /** Live session mode at open (Conversation | Interview). */
+  mode?: VoiceModeToken
 }
 
 export interface VoiceSessionApi {
@@ -127,6 +145,15 @@ export interface VoiceSessionApi {
   replaying: boolean
   /** The explicit Live speech language ('en' | 'ar'). */
   language: 'en' | 'ar'
+  /** The Live session mode (Conversation | Interview). */
+  mode: VoiceModeToken
+  /** Switch the Live session mode (Conversation <-> Interview). Safe at any
+   *  stage — it only changes what the next /tutor turn sends. Entering
+   *  Interview resets the spoken turn counter. */
+  setMode(mode: VoiceModeToken): void
+  /** Finish a Live interview session and fetch its deterministic summary
+   *  (Phase 4D). Returns the summary text or null on failure. */
+  finishInterview(): Promise<string | null>
   /** Switch the Live speech language mid-session (EN | عربي). Safe: hushes the
    *  current recognizer, applies after playback when the mentor is speaking,
    *  and never recreates the session. */
@@ -139,6 +166,8 @@ export interface VoiceSessionApi {
   replay(text: string): Promise<'ok' | 'voice-unavailable'>
   abort(): void
   injectTranscript(text: string): void
+  /** The deterministic Live-interview summary text fetched by finishInterview. */
+  interviewSummary?: string | null
 }
 
 export function useVoiceSession(opts: UseVoiceSessionOptions): VoiceSessionApi {
@@ -146,12 +175,14 @@ export function useVoiceSession(opts: UseVoiceSessionOptions): VoiceSessionApi {
   const [errorState, setErrorState] = useState<{ kind: VoiceErrorKind; message: string } | null>(null)
   const [transcript, setTranscript] = useState<VoiceTranscriptItem[]>([])
   const [detectedLang, setDetectedLang] = useState<'en' | 'ar'>(opts.language === 'ar' ? 'ar' : 'en')
+  const [modeState, setModeState] = useState<VoiceModeToken>(() => readStoredMode(opts.mode))
+  const [interviewSummaryText, setInterviewSummaryText] = useState<string | null>(null)
 
   const sessionRef = useRef<VoiceSession | null>(null)
   const optsRef = useRef(opts)
   optsRef.current = opts
-  const callbacksRef = useRef({ onAssistantReply: opts.onAssistantReply, onUserMessage: opts.onUserMessage, onTrace: opts.onTrace })
-  callbacksRef.current = { onAssistantReply: opts.onAssistantReply, onUserMessage: opts.onUserMessage, onTrace: opts.onTrace }
+  const callbacksRef = useRef({ onAssistantReply: opts.onAssistantReply, onUserMessage: opts.onUserMessage, onTrace: opts.onTrace, onModeChange: opts.onModeChange })
+  callbacksRef.current = { onAssistantReply: opts.onAssistantReply, onUserMessage: opts.onUserMessage, onTrace: opts.onTrace, onModeChange: opts.onModeChange }
 
   const player = useTTSPlayer(opts.studentId, opts.tutor)
 
@@ -163,11 +194,14 @@ export function useVoiceSession(opts: UseVoiceSessionOptions): VoiceSessionApi {
       recognition: buildRecognitionAdapter(win, opts.recognitionSupported),
       tts: player.adapter,
       send: (text, signal, sessionOpts) => optsRef.current.send(text, signal, sessionOpts),
+      interviewSummary: (signal, sessionOpts) => optsRef.current.interviewSummary!(signal, sessionOpts),
       schedule: (cb, ms) => window.setTimeout(cb, ms),
       cancelSchedule: (id) => window.clearTimeout(id),
     }
+    if (!optsRef.current.interviewSummary) delete adapters.interviewSummary
     const session = new VoiceSession(adapters, {
       language: opts.language,
+      mode: readStoredMode(opts.mode),
       skipBrowserStt: opts.skipBrowserStt,
       // Phase 4B.1 Live: after the mentor's reply finishes playing, return to
       // listening automatically — the user never restarts the mic per turn.
@@ -189,6 +223,10 @@ export function useVoiceSession(opts: UseVoiceSessionOptions): VoiceSessionApi {
       },
       onError: (kind, message) => setErrorState({ kind, message }),
       onAssistantReply: (text) => callbacksRef.current.onAssistantReply?.(text),
+      onModeChange: (mode) => {
+        setModeState(mode)
+        callbacksRef.current.onModeChange?.(mode)
+      },
     })
     sessionRef.current = session
     return () => {
@@ -203,6 +241,7 @@ export function useVoiceSession(opts: UseVoiceSessionOptions): VoiceSessionApi {
   const open = useCallback(() => {
     setErrorState(null)
     setTranscript([])
+    setInterviewSummaryText(null)
     sessionRef.current?.clear()
     sessionRef.current?.start()
   }, [])
@@ -254,6 +293,37 @@ export function useVoiceSession(opts: UseVoiceSessionOptions): VoiceSessionApi {
     sessionRef.current?.injectTranscript(text)
   }, [])
 
+  /** Switch the Live session mode (Conversation <-> Interview). Safe — it only
+   *  changes what the next /tutor turn sends. Entering Interview resets the
+   *  spoken turn counter so a fresh interview starts from probe #1. The last
+   *  mode is persisted locally so Live re-opens in it (Phase 4D). */
+  const setMode = useCallback((mode: VoiceModeToken) => {
+    const next = mode === 'interview' ? 'interview' : 'chat'
+    setModeState(next)
+    sessionRef.current?.setMode(next)
+    try {
+      if (typeof window !== 'undefined') window.localStorage.setItem(LIVE_MODE_KEY, next)
+    } catch { /* storage unavailable — in-memory state still works */ }
+  }, [])
+
+  /** Finish a Live interview session and fetch its deterministic Phase 4D
+   *  summary (practice feedback only, never verifies). */
+  const finishInterview = useCallback(async () => {
+    setErrorState(null)
+    const summary = await sessionRef.current?.finishInterview()
+    setInterviewSummaryText(summary ?? null)
+    return summary ?? null
+  }, [])
+
+  useEffect(() => {
+    callbacksRef.current = {
+      onAssistantReply: opts.onAssistantReply,
+      onUserMessage: opts.onUserMessage,
+      onTrace: opts.onTrace,
+      onModeChange: opts.onModeChange,
+    }
+  }, [opts.onAssistantReply, opts.onUserMessage, opts.onTrace, opts.onModeChange])
+
   return {
     state,
     error: errorState?.message ?? null,
@@ -262,6 +332,10 @@ export function useVoiceSession(opts: UseVoiceSessionOptions): VoiceSessionApi {
     supported: opts.recognitionSupported,
     replaying: player.replaying,
     language: detectedLang,
+    mode: modeState,
+    setMode,
+    finishInterview,
+    interviewSummary: interviewSummaryText,
     setLanguage,
     open,
     close,
